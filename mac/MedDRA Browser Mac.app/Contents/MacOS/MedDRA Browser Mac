@@ -1,0 +1,41 @@
+#!/bin/zsh
+set -eu
+
+APP_MACOS_DIR="$(cd "$(dirname "$0")" && pwd)"
+REPO_DIR="$(cd "${APP_MACOS_DIR}/../../../.." && pwd)"
+HOST="127.0.0.1"
+PORT="${MEDDRA_BROWSER_PORT:-8765}"
+URL="http://${HOST}:${PORT}/"
+LOG_DIR="${REPO_DIR}/logs/app"
+STARTER="${REPO_DIR}/scripts/start_meddra_server.sh"
+
+mkdir -p "${LOG_DIR}"
+cd "${REPO_DIR}"
+
+if ! curl -fsS "http://${HOST}:${PORT}/api/status" >/dev/null 2>&1; then
+  if [ -t 1 ]; then
+    "${STARTER}"
+  else
+    TERMINAL_COMMAND="$(printf '%q' "${STARTER}")"
+    osascript <<OSA
+tell application "Terminal"
+  do script "${TERMINAL_COMMAND}"
+end tell
+OSA
+  fi
+fi
+
+for _ in {1..60}; do
+  if curl -fsS "http://${HOST}:${PORT}/api/status" >/dev/null 2>&1; then
+    break
+  fi
+  sleep 1
+done
+
+if [ -d "/Applications/Microsoft Edge.app" ]; then
+  open -na "Microsoft Edge" --args --app="${URL}"
+elif [ -d "/Applications/Google Chrome.app" ]; then
+  open -na "Google Chrome" --args --app="${URL}"
+else
+  open "${URL}"
+fi

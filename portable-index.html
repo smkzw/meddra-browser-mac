@@ -1,0 +1,105 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>MedDRA Browser Portable Launcher</title>
+    <style>
+      :root {
+        font-family: Inter, "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+        color: #17201b;
+        background: #eef2ef;
+      }
+      body {
+        min-height: 100vh;
+        margin: 0;
+        display: grid;
+        place-items: center;
+        padding: 24px;
+      }
+      main {
+        width: min(720px, 100%);
+        padding: 28px;
+        border: 1px solid #dce4df;
+        border-radius: 10px;
+        background: #fbfcfb;
+        box-shadow: 0 18px 44px rgba(31, 74, 63, 0.12);
+      }
+      header {
+        display: flex;
+        align-items: center;
+        gap: 14px;
+        margin-bottom: 18px;
+      }
+      img {
+        width: 56px;
+        height: 56px;
+        border-radius: 12px;
+      }
+      h1 {
+        margin: 0;
+        font-size: 24px;
+      }
+      p {
+        line-height: 1.7;
+      }
+      code {
+        padding: 2px 5px;
+        border-radius: 5px;
+        background: #edf3ef;
+      }
+      a {
+        color: #126451;
+        font-weight: 700;
+      }
+      .status {
+        margin-top: 18px;
+        padding: 12px 14px;
+        border-radius: 8px;
+        background: #edf7f3;
+      }
+    </style>
+    <script>
+      async function checkServer() {
+        const status = document.getElementById("status");
+        try {
+          const response = await fetch("http://127.0.0.1:8765/api/status", { cache: "no-store" });
+          if (response.ok) {
+            status.textContent = "本地服务已启动，正在打开浏览器界面...";
+            window.location.href = "http://127.0.0.1:8765/";
+            return;
+          }
+          status.textContent = "本地服务已启动，但尚未发现可用MedDRA词典目录。正在打开设置页...";
+          window.location.href = "http://127.0.0.1:8765/";
+        } catch (error) {
+          status.textContent = "尚未检测到本地服务。Windows 请双击 start_windows.bat；macOS 请运行 scripts/start_meddra_server.sh。";
+          window.setTimeout(checkServer, 2000);
+        }
+      }
+      window.addEventListener("DOMContentLoaded", checkServer);
+    </script>
+  </head>
+  <body>
+    <main>
+      <header>
+        <img src="frontend/dist/brand/app-icon-256.png" alt="" />
+        <div>
+          <h1>MedDRA Browser Portable</h1>
+          <p>本地词典浏览 · 中文界面 · Windows/macOS 便携入口</p>
+        </div>
+      </header>
+      <p>
+        由于浏览器安全限制，直接打开 HTML 不能自行启动 Python/FastAPI 后端，也不能直接读取本地 MedDRA ASCII 文件。
+        本便携包采用同文件夹本地服务方式运行：解压后先启动本地服务，再由浏览器打开完整界面。
+      </p>
+      <p>
+        Windows：双击 <code>start_windows.bat</code>。首次运行会创建 <code>.venv_windows</code> 并安装依赖。
+        将授权获得的 MedDRA ASCII 目录放在本文件夹的 <code>dictionaries</code> 下，或设置环境变量 <code>MEDDRA_SOURCE_ROOT</code>。
+      </p>
+      <p>
+        服务启动后可访问 <a href="http://127.0.0.1:8765/">http://127.0.0.1:8765/</a>。
+      </p>
+      <div id="status" class="status">正在检测本地服务...</div>
+    </main>
+  </body>
+</html>
