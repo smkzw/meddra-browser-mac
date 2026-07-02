@@ -56,7 +56,7 @@
 普通使用者需要：
 
 - 已授权取得的 MedDRA ASCII 词典文件夹。
-- Python 3.10 或更新版本，用于启动本地 FastAPI 服务。
+- Python 3.9 或更新版本，用于启动本地 FastAPI 服务。
 - macOS App 发布包已内置后端 Python 依赖，但仍需要系统能运行 `python3`；从源码构建 App 时会绑定当前机器的 `python3` 小版本。
 - Windows 便携包首次运行时需要联网安装后端依赖；依赖清单见 `backend/requirements.txt`。
 
@@ -98,9 +98,10 @@ intl_ord.asc
 默认数据源优先级：
 
 1. 环境变量 `MEDDRA_SOURCE_ROOT`。
-2. App/便携包内的 `dictionaries/`，仅在其中实际包含 MedDRA ASCII 文件时启用。
-3. 项目上级 MedDRA 工作目录。
-4. macOS App 启动器还会自动尝试 `~/Documents/指导原则及临床试验规范合集/MedDRA` 和 `~/Documents/MedDRA`。
+2. macOS App 的 `~/Library/Application Support/MedDRA Browser Mac/dictionaries/`。
+3. App/便携包内的 `dictionaries/`，仅在其中实际包含 MedDRA ASCII 文件时启用。
+4. 项目上级 MedDRA 工作目录。
+5. macOS App 启动器还会自动尝试 `~/Documents/指导原则及临床试验规范合集/MedDRA` 和 `~/Documents/MedDRA`，但双击 App 时这些位置可能受 macOS 隐私权限限制。
 
 同义词表默认从以下位置发现：
 
@@ -141,6 +142,18 @@ http://127.0.0.1:8765/
 ~/Library/Application Support/MedDRA Browser Mac/data
 ~/Library/Application Support/MedDRA Browser Mac/dictionaries
 ~/Library/Logs/MedDRA Browser Mac/server.log
+```
+
+macOS 双击 App 时，`Documents` 目录可能受系统隐私权限限制。推荐将已授权 MedDRA ASCII 发行目录复制到：
+
+```text
+~/Library/Application Support/MedDRA Browser Mac/dictionaries/
+```
+
+从源码目录可运行：
+
+```bash
+./scripts/install_macos_dictionaries.sh "/path/to/MedDRA"
 ```
 
 ### 方式二：从源码生成并安装 App
@@ -369,7 +382,7 @@ All data stays local.
 End users need:
 
 - Licensed MedDRA ASCII dictionary folders.
-- Python 3.10 or later to run the local FastAPI service.
+- Python 3.9 or later to run the local FastAPI service.
 - The macOS app bundle vendors backend Python dependencies, but still requires a working system `python3`; source-built app bundles are tied to the builder machine's `python3` minor version.
 - Internet access on first Windows portable launch to install backend dependencies from `backend/requirements.txt`.
 
@@ -388,7 +401,7 @@ python3 -m playwright install chromium
 
 Set `MEDDRA_SOURCE_ROOT` to the folder containing licensed MedDRA ASCII releases, or place releases in the portable `dictionaries/` folder.
 
-The app only treats a bundled `dictionaries/` folder as a source when it actually contains MedDRA ASCII files. On macOS, the app launcher also checks `~/Documents/指导原则及临床试验规范合集/MedDRA` and `~/Documents/MedDRA`.
+The macOS app first checks `~/Library/Application Support/MedDRA Browser Mac/dictionaries/`. A bundled `dictionaries/` folder is only treated as a source when it actually contains MedDRA ASCII files. The app launcher also checks `~/Documents/指导原则及临床试验规范合集/MedDRA` and `~/Documents/MedDRA`, but direct double-click launch may be blocked by macOS privacy controls when reading Documents.
 
 Required files include `soc.asc`, `pt.asc`, `llt.asc`, `mdhier.asc`, `smq_list.asc`, and `smq_content.asc` plus the relationship files listed in the Chinese section above.
 
@@ -415,6 +428,18 @@ The app writes runtime data and logs under:
 ```text
 ~/Library/Application Support/MedDRA Browser Mac/
 ~/Library/Logs/MedDRA Browser Mac/server.log
+```
+
+For double-click launch, place licensed MedDRA ASCII release folders under:
+
+```text
+~/Library/Application Support/MedDRA Browser Mac/dictionaries/
+```
+
+From a source checkout, you can install local dictionaries there with:
+
+```bash
+./scripts/install_macos_dictionaries.sh "/path/to/MedDRA"
 ```
 
 Command-line local service mode:

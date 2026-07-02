@@ -33,6 +33,7 @@ python3 - "${PAYLOAD_DIR}/vendor" <<'PY'
 from __future__ import annotations
 
 import importlib.metadata as metadata
+import platform
 import re
 import shutil
 import sys
@@ -78,6 +79,7 @@ for key in sorted(seen):
         shutil.copy2(source, target)
 
 (vendor / ".python-version").write_text(f"{sys.version_info.major}.{sys.version_info.minor}\n", encoding="utf-8")
+(vendor / ".python-arch").write_text(f"{platform.machine()}\n", encoding="utf-8")
 print(f"Vendored {len(seen)} Python distributions into {vendor}")
 PY
 
@@ -171,18 +173,35 @@ fail() {
 }
 
 if ! command -v python3 >/dev/null 2>&1; then
-  fail "未找到 python3。请先安装 Python 3.10 或更新版本，然后重新打开 App。"
+  fail "未找到 python3。请先安装 Python 3.9 或更新版本，然后重新打开 App。"
 fi
 
-RUNTIME_PY="$(python3 - <<'PY'
+VENDOR_PY="$(cat "${VENDOR_DIR}/.python-version" 2>/dev/null || true)"
+VENDOR_ARCH="$(cat "${VENDOR_DIR}/.python-arch" 2>/dev/null || true)"
+typeset -a PYTHON_CMD
+PYTHON_CMD=(python3)
+
+if [ "$(sysctl -in hw.optional.arm64 2>/dev/null || echo 0)" = "1" ]; then
+  if [ "${VENDOR_ARCH}" = "arm64" ]; then
+    PYTHON_CMD=(/usr/bin/arch -arm64 python3)
+  elif [ "${VENDOR_ARCH}" = "x86_64" ]; then
+    PYTHON_CMD=(/usr/bin/arch -x86_64 python3)
+  fi
+fi
+
+RUNTIME_INFO="$("${PYTHON_CMD[@]}" - <<'PY'
+import platform
 import sys
-print(f"{sys.version_info.major}.{sys.version_info.minor}")
+print(f"{sys.version_info.major}.{sys.version_info.minor}|{platform.machine()}")
 PY
 )"
-VENDOR_PY="$(cat "${VENDOR_DIR}/.python-version" 2>/dev/null || true)"
-if [ "${RUNTIME_PY}" != "${VENDOR_PY}" ]; then
-  fail "当前 python3 版本为 ${RUNTIME_PY}，但此 App 内置依赖为 ${VENDOR_PY}。请用当前机器重新运行 scripts/build_macos_app.sh 构建 App。"
+RUNTIME_PY="${RUNTIME_INFO%%|*}"
+RUNTIME_ARCH="${RUNTIME_INFO#*|}"
+if [ "${RUNTIME_PY}" != "${VENDOR_PY}" ] || [ "${RUNTIME_ARCH}" != "${VENDOR_ARCH}" ]; then
+  fail "当前 python3 为 ${RUNTIME_PY}/${RUNTIME_ARCH}，但此 App 内置依赖为 ${VENDOR_PY}/${VENDOR_ARCH}。请用当前机器重新运行 scripts/build_macos_app.sh 构建 App。"
 fi
+
+echo "[$(date '+%Y-%m-%d %H:%M:%S')] python=${PYTHON_CMD[*]} runtime=${RUNTIME_PY}/${RUNTIME_ARCH} vendor=${VENDOR_PY}/${VENDOR_ARCH}" >> "${SERVER_LOG}"
 
 if [ -z "${MEDDRA_SOURCE_ROOT:-}" ]; then
   if [ -d "${DICT_DIR}" ] && find "${DICT_DIR}" -name soc.asc -print -quit | grep -q .; then
@@ -203,7 +222,7 @@ if ! curl -fsS --max-time 1 "http://${HOST}:${PORT}/api/source-roots" >/dev/null
   notify "正在启动本地 MedDRA Browser 服务..."
   (
     cd "${APP_ROOT}"
-    nohup python3 -m uvicorn app.main:app --host "${HOST}" --port "${PORT}" >> "${SERVER_LOG}" 2>&1 &
+    nohup "${PYTHON_CMD[@]}" -m uvicorn app.main:app --host "${HOST}" --port "${PORT}" >> "${SERVER_LOG}" 2>&1 &
     echo "$!" > "${PID_FILE}"
   )
 fi
