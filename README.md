@@ -57,6 +57,7 @@
 
 - 已授权取得的 MedDRA ASCII 词典文件夹。
 - Python 3.10 或更新版本，用于启动本地 FastAPI 服务。
+- macOS App 发布包已内置后端 Python 依赖，但仍需要系统能运行 `python3`；从源码构建 App 时会绑定当前机器的 `python3` 小版本。
 - Windows 便携包首次运行时需要联网安装后端依赖；依赖清单见 `backend/requirements.txt`。
 
 开发者额外需要：
@@ -97,8 +98,9 @@ intl_ord.asc
 默认数据源优先级：
 
 1. 环境变量 `MEDDRA_SOURCE_ROOT`。
-2. 项目同级便携目录 `dictionaries/`。
+2. App/便携包内的 `dictionaries/`，仅在其中实际包含 MedDRA ASCII 文件时启用。
 3. 项目上级 MedDRA 工作目录。
+4. macOS App 启动器还会自动尝试 `~/Documents/指导原则及临床试验规范合集/MedDRA` 和 `~/Documents/MedDRA`。
 
 同义词表默认从以下位置发现：
 
@@ -117,12 +119,12 @@ backend/data/meddra_28_2_en_<hash>.sqlite
 
 ## macOS 使用方式
 
-### 方式一：打开本地 App
+### 方式一：安装自包含 App
 
-项目内包含本地包装：
+从 GitHub Release 下载 `meddra-browser-mac-app.zip`，解压后将 App 拖入：
 
 ```text
-mac/MedDRA Browser Mac.app
+/Applications/MedDRA Browser Mac.app
 ```
 
 双击 App 后会启动本地 FastAPI 服务，并打开：
@@ -131,9 +133,25 @@ mac/MedDRA Browser Mac.app
 http://127.0.0.1:8765/
 ```
 
-这是本地 wrapper App，不是已签名或 notarized 的公开发行版。
+这是未签名、未 notarized 的本地 App。首次打开如果被 macOS 拦截，可在 Finder 中右键 App，选择“打开”。
 
-### 方式二：命令行启动
+运行时文件位置：
+
+```text
+~/Library/Application Support/MedDRA Browser Mac/data
+~/Library/Application Support/MedDRA Browser Mac/dictionaries
+~/Library/Logs/MedDRA Browser Mac/server.log
+```
+
+### 方式二：从源码生成并安装 App
+
+```bash
+./scripts/build_macos_app.sh "/Applications/MedDRA Browser Mac.app"
+```
+
+该 App 会把前端、后端和当前 `python3` 对应的后端依赖一起打包，因此移动到 `/Applications` 后不再依赖仓库目录。若在另一台 Mac 上运行时提示 Python 小版本不一致，请在目标机器上重新执行上述构建命令。
+
+### 方式三：命令行启动
 
 ```bash
 ./scripts/start_meddra_server.sh
@@ -275,7 +293,7 @@ python3 scripts/playwright_smoke.py
 
 ## 打包发布
 
-生成 Windows/macOS 可复用的便携 zip：
+生成 Windows 便携 zip：
 
 ```bash
 ./scripts/build_portable_package.sh
@@ -285,6 +303,13 @@ python3 scripts/playwright_smoke.py
 
 ```text
 build/meddra-browser-portable.zip
+```
+
+生成 macOS App：
+
+```bash
+./scripts/build_macos_app.sh
+ditto -c -k --sequesterRsrc --keepParent "build/MedDRA Browser Mac.app" build/meddra-browser-mac-app.zip
 ```
 
 该 zip 不包含 MedDRA 原始词典数据。
@@ -345,6 +370,7 @@ End users need:
 
 - Licensed MedDRA ASCII dictionary folders.
 - Python 3.10 or later to run the local FastAPI service.
+- The macOS app bundle vendors backend Python dependencies, but still requires a working system `python3`; source-built app bundles are tied to the builder machine's `python3` minor version.
 - Internet access on first Windows portable launch to install backend dependencies from `backend/requirements.txt`.
 
 Developers also need:
@@ -362,21 +388,40 @@ python3 -m playwright install chromium
 
 Set `MEDDRA_SOURCE_ROOT` to the folder containing licensed MedDRA ASCII releases, or place releases in the portable `dictionaries/` folder.
 
+The app only treats a bundled `dictionaries/` folder as a source when it actually contains MedDRA ASCII files. On macOS, the app launcher also checks `~/Documents/指导原则及临床试验规范合集/MedDRA` and `~/Documents/MedDRA`.
+
 Required files include `soc.asc`, `pt.asc`, `llt.asc`, `mdhier.asc`, `smq_list.asc`, and `smq_content.asc` plus the relationship files listed in the Chinese section above.
 
 MedDRA source files and SQLite caches are intentionally excluded from GitHub.
 
 ## Run On macOS
 
+Download `meddra-browser-mac-app.zip` from a release, unzip it, and move the app to:
+
+```text
+/Applications/MedDRA Browser Mac.app
+```
+
+Then double-click it. If macOS blocks the unsigned app, use Finder right-click and choose Open.
+
+To build the movable app from source:
+
+```bash
+./scripts/build_macos_app.sh "/Applications/MedDRA Browser Mac.app"
+```
+
+The app writes runtime data and logs under:
+
+```text
+~/Library/Application Support/MedDRA Browser Mac/
+~/Library/Logs/MedDRA Browser Mac/server.log
+```
+
+Command-line local service mode:
+
 ```bash
 ./scripts/start_meddra_server.sh
 open http://127.0.0.1:8765/
-```
-
-Or open:
-
-```text
-mac/MedDRA Browser Mac.app
 ```
 
 ## Run On Windows

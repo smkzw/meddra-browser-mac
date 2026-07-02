@@ -112,7 +112,6 @@ class SourceConfig:
 
 def default_source_config(version: str | None = None, root: Path | None = None) -> SourceConfig:
     med_root = root or default_med_root()
-    project_root = Path(__file__).resolve().parents[2]
     releases = discover_releases(med_root)
     if not releases:
         raise RuntimeError(f"未在 {med_root} 发现可用的MedDRA ASCII词典目录")
@@ -130,7 +129,7 @@ def default_source_config(version: str | None = None, root: Path | None = None) 
         chinese_dir=selected.chinese_dir,
         synonym_english=default_synonym_root(med_root) / "meddra_synonym_english.asc",
         synonym_chinese=default_synonym_root(med_root) / "meddra_synonym_chinese.asc",
-        db_path=project_root / "backend" / "data" / db_name,
+        db_path=project_data_dir() / db_name,
         available_versions=tuple(releases),
     )
 
@@ -141,9 +140,23 @@ def default_med_root() -> Path:
         return Path(env_root).expanduser()
     project_root = Path(__file__).resolve().parents[2]
     portable_root = project_root / "dictionaries"
+    if contains_meddra_ascii(portable_root):
+        return portable_root
+    if contains_meddra_ascii(project_root.parent):
+        return project_root.parent
     if portable_root.exists():
         return portable_root
     return project_root.parent
+
+
+def contains_meddra_ascii(root: Path) -> bool:
+    if not root.exists() or not root.is_dir():
+        return False
+    try:
+        next(root.rglob("soc.asc"))
+    except (StopIteration, OSError):
+        return False
+    return True
 
 
 def default_synonym_root(med_root: Path) -> Path:
@@ -163,6 +176,9 @@ def default_synonym_root(med_root: Path) -> Path:
 
 
 def project_data_dir() -> Path:
+    env_root = os.environ.get("MEDDRA_BROWSER_STATE_DIR")
+    if env_root:
+        return Path(env_root).expanduser()
     return Path(__file__).resolve().parents[2] / "backend" / "data"
 
 
