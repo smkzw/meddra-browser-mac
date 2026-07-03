@@ -563,7 +563,7 @@ export default function App() {
       setSynonymStatus(
         data.results?.length
           ? `已载入${lang === "zh" ? "中文" : "英文"}同义词表预览`
-          : `未找到${lang === "zh" ? "中文" : "英文"}同义词表；如需启用，请在词典来源附近放置 MDB 同义词文件夹，或设置 MEDDRA_SYNONYM_ROOT。`
+          : `未找到${lang === "zh" ? "中文" : "英文"}同义词表；如需启用，请把 MDB4 或 MDB41_D241_B123 同义词文件夹放在词典文件夹旁边。`
       );
       addHistory("同义词表", lang === "zh" ? "中文" : "英文");
     } catch (error) {
@@ -654,6 +654,9 @@ export default function App() {
   function applySourceRootResult(data: { roots?: SourceRoot[]; releases?: ReleaseInfo[] }) {
     setSourceRoots(data.roots || []);
     setStatus((current) => current ? { ...current, available_versions: data.releases || current.available_versions } : current);
+    if (!version && data.releases?.length) {
+      setVersion(data.releases[0].version);
+    }
   }
 
   async function pickDictionarySource() {
@@ -670,7 +673,7 @@ export default function App() {
       }
       applySourceRootResult(data);
       setSourcePath("");
-      flash("词典来源已加入，可选择版本后重建索引");
+      flash("已绑定词典文件夹，可以开始查询");
     } catch (error) {
       flash((error as Error).message || "无法打开文件夹选择器");
     } finally {
@@ -692,7 +695,7 @@ export default function App() {
       }, "导入目录失败");
       applySourceRootResult(data);
       setSourcePath("");
-      flash("词典来源已加入，可选择版本后重建索引");
+      flash("已绑定词典文件夹，可以开始查询");
     } catch (error) {
       flash((error as Error).message || "导入目录失败");
     } finally {
@@ -995,6 +998,12 @@ export default function App() {
 
           {module === "settings" && (
             <section className="module settings-panel">
+              {!status?.version && (
+                <div className="dictionary-banner">
+                  <strong>还没有绑定 MedDRA 词典</strong>
+                  <span>请点击下方“选择词典文件夹”，在 Windows 文件管理器或 Mac Finder 里选择你的 MedDRA 文件夹。选中上级文件夹也可以。</span>
+                </div>
+              )}
               <OptionsRow
                 includeSynonyms={includeSynonyms}
                 setIncludeSynonyms={setIncludeSynonyms}
@@ -1009,9 +1018,10 @@ export default function App() {
               </div>
               <div className="source-import">
                 <header>
-                  <h2>词典来源导入</h2>
-                  <p>选择包含 MedDRA ASCII 文件的文件夹；可选具体 MedAscii/ascii 目录，也可选其上级版本目录或工作目录。</p>
+                  <h2>绑定 MedDRA 词典文件夹</h2>
+                  <p>第一次使用时，点击“选择词典文件夹”。在 Windows 文件管理器或 Mac Finder 里选 MedDRA_29_0_Chinese、MedDRA_29_0_English、MedAscii/ascii-290，或它们的上级文件夹。系统会自己往下找。</p>
                 </header>
+                <p className="source-help">正常的 MedDRA 词典文件夹里会有下面这些文件。你不用逐个打开它们，只要选中它们所在的文件夹。</p>
                 <div className="required-files">
                   {["soc.asc", "pt.asc", "llt.asc", "mdhier.asc", "smq_list.asc", "smq_content.asc"].map((file) => (
                     <code key={file}>{file}</code>
@@ -1019,9 +1029,9 @@ export default function App() {
                 </div>
                 <div className="query-bar compact">
                   <button className="primary" onClick={pickDictionarySource} disabled={importingSource}>
-                    <Upload size={16} /> 加入来源
+                    <Upload size={16} /> 选择词典文件夹
                   </button>
-                  <input value={sourcePath} onChange={(event) => setSourcePath(event.target.value)} placeholder="也可手动粘贴词典文件夹路径" />
+                  <input value={sourcePath} onChange={(event) => setSourcePath(event.target.value)} placeholder="找不到选择窗口时，可把词典文件夹路径粘贴到这里" />
                   <button onClick={addDictionarySourceFromPath} disabled={importingSource}>
                     手动加入路径
                   </button>

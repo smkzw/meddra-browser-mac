@@ -317,10 +317,10 @@ def run(page: Page) -> list[str]:
     checks.append("Research Bin export")
 
     page.get_by_role("button", name="设置").click()
-    expect(page.get_by_text("词典来源导入")).to_be_visible()
+    expect(page.get_by_text("绑定 MedDRA 词典文件夹")).to_be_visible()
     expect(page.get_by_text("mdhier.asc")).to_be_visible()
-    expect(page.get_by_role("button", name="加入来源")).to_be_visible()
-    expect(page.get_by_placeholder("也可手动粘贴词典文件夹路径")).to_be_visible()
+    expect(page.get_by_role("button", name="选择词典文件夹")).to_be_visible()
+    expect(page.get_by_placeholder("找不到选择窗口时，可把词典文件夹路径粘贴到这里")).to_be_visible()
     settings_text = page.locator(".settings-panel").text_content() or ""
     assert "/Users/" not in settings_text and ".sqlite" not in settings_text, settings_text
     with page.expect_response(lambda response: "/api/synonyms" in response.url and response.ok):

@@ -233,7 +233,7 @@ export default async function runMeddraSmoke(page) {
   await binDownload[0].saveAs("output/playwright/research-bin.json");
 
   await page.getByRole("button", { name: "设置" }).click();
-  await ensureVisible("词典来源导入", page.getByText("词典来源导入"));
+  await ensureVisible("绑定 MedDRA 词典文件夹", page.getByText("绑定 MedDRA 词典文件夹"));
   await ensureVisible("导入文件提示", page.getByText("mdhier.asc"));
   const synonymResponse = page.waitForResponse((response) => response.url().includes("/api/synonyms") && response.ok());
   await page.getByRole("button", { name: "查看中文同义词表" }).click();

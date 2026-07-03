@@ -3,7 +3,7 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>MedDRA Browser Portable Launcher</title>
+    <title>MedDRA Browser 便携版入口</title>
     <style>
       :root {
         font-family: Inter, "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
@@ -58,8 +58,35 @@
         border-radius: 8px;
         background: #edf7f3;
       }
+      .steps {
+        display: grid;
+        gap: 10px;
+        margin: 18px 0;
+      }
+      .step {
+        padding: 12px 14px;
+        border: 1px solid #dce4df;
+        border-radius: 8px;
+        background: #f6f8f7;
+      }
+      .step strong {
+        display: block;
+        margin-bottom: 4px;
+      }
     </style>
     <script>
+      function platformStepText() {
+        const platform = navigator.platform || "";
+        const ua = navigator.userAgent || "";
+        if (/Win/i.test(platform) || /Windows/i.test(ua)) {
+          return "请先双击【Windows】第一步：请双击我运行.bat。";
+        }
+        if (/Mac/i.test(platform) || /Mac OS/i.test(ua)) {
+          return "请先双击【Mac】第一步：请双击我运行.command。";
+        }
+        return "请先运行与你电脑系统对应的“第一步”文件。";
+      }
+
       async function checkServer() {
         const status = document.getElementById("status");
         try {
@@ -69,10 +96,10 @@
             window.location.href = "http://127.0.0.1:8765/";
             return;
           }
-          status.textContent = "本地服务已启动，但尚未发现可用MedDRA词典目录。正在打开设置页...";
+          status.textContent = "本地服务已启动。系统还没有绑定词典文件夹，正在打开设置页...";
           window.location.href = "http://127.0.0.1:8765/";
         } catch (error) {
-          status.textContent = "尚未检测到本地服务。Windows 请双击 start_windows.bat；macOS 请运行 scripts/start_meddra_server.sh。";
+          status.textContent = "还没有检测到本地服务。" + platformStepText();
           window.setTimeout(checkServer, 2000);
         }
       }
@@ -85,20 +112,21 @@
         <img src="frontend/dist/brand/app-icon-256.png" alt="" />
         <div>
           <h1>MedDRA Browser Portable</h1>
-          <p>本地词典浏览 · 中文界面 · Windows/macOS 便携入口</p>
+          <p>本地词典浏览 · 中文界面 · Windows 和 Mac 共用便携包</p>
         </div>
       </header>
-      <p>
-        由于浏览器安全限制，直接打开 HTML 不能自行启动 Python/FastAPI 后端，也不能直接读取本地 MedDRA ASCII 文件。
-        本便携包采用同文件夹本地服务方式运行：解压后先启动本地服务，再由浏览器打开完整界面。
-      </p>
-      <p>
-        Windows：双击 <code>start_windows.bat</code>。首次运行会创建 <code>.venv_windows</code> 并安装依赖。
-        将授权获得的 MedDRA ASCII 目录放在本文件夹的 <code>dictionaries</code> 下，或设置环境变量 <code>MEDDRA_SOURCE_ROOT</code>。
-      </p>
-      <p>
-        服务启动后可访问 <a href="http://127.0.0.1:8765/">http://127.0.0.1:8765/</a>。
-      </p>
+      <p>浏览器不能直接替你运行电脑里的程序，所以便携版分两步打开。</p>
+      <div class="steps">
+        <div class="step">
+          <strong>第一步：启动本地服务</strong>
+          Windows 双击 <code>【Windows】第一步：请双击我运行.bat</code>。Mac 双击 <code>【Mac】第一步：请双击我运行.command</code>。
+        </div>
+        <div class="step">
+          <strong>第二步：打开浏览器入口</strong>
+          双击 <code>第二步：双击我开始MedDRA浏览.html</code>。如果服务已经启动，本页会自动进入系统。
+        </div>
+      </div>
+      <p>进入系统后，如果提示还没有词典，请点“选择词典文件夹”。在文件管理器或 Finder 里选你的 MedDRA 文件夹即可，比如 MedDRA_29_0_Chinese、MedDRA_29_0_English、MedAscii、ascii-290，或它们的上级文件夹。</p>
       <div id="status" class="status">正在检测本地服务...</div>
     </main>
   </body>

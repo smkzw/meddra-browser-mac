@@ -20,7 +20,7 @@ PAYLOAD_DIR="${RESOURCES_DIR}/app"
 (cd "${ROOT_DIR}/frontend" && npm run build)
 
 rm -rf "${APP_PATH}"
-mkdir -p "${MACOS_DIR}" "${RESOURCES_DIR}" "${PAYLOAD_DIR}/backend" "${PAYLOAD_DIR}/frontend" "${PAYLOAD_DIR}/dictionaries" "${PAYLOAD_DIR}/vendor"
+mkdir -p "${MACOS_DIR}" "${RESOURCES_DIR}" "${PAYLOAD_DIR}/backend" "${PAYLOAD_DIR}/frontend" "${PAYLOAD_DIR}/vendor"
 
 cp -R "${ROOT_DIR}/backend/app" "${PAYLOAD_DIR}/backend/app"
 cp "${ROOT_DIR}/backend/requirements.txt" "${PAYLOAD_DIR}/backend/requirements.txt"
@@ -99,12 +99,6 @@ for direct_url in vendor.glob("*.dist-info/direct_url.json"):
 print(f"Vendored {len(seen)} Python distributions into {vendor}")
 PY
 
-cat > "${PAYLOAD_DIR}/dictionaries/README.txt" <<'TXT'
-Place licensed MedDRA ASCII release folders here, or add a dictionary folder from the Settings page after launching the app.
-
-MedDRA data is licensed separately and is not included in this app.
-TXT
-
 cat > "${CONTENTS_DIR}/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -125,9 +119,9 @@ cat > "${CONTENTS_DIR}/Info.plist" <<'PLIST'
   <key>CFBundlePackageType</key>
   <string>APPL</string>
   <key>CFBundleShortVersionString</key>
-  <string>0.1.4</string>
+  <string>0.1.5</string>
   <key>CFBundleVersion</key>
-  <string>5</string>
+  <string>6</string>
   <key>LSMinimumSystemVersion</key>
   <string>12.0</string>
   <key>NSHighResolutionCapable</key>
@@ -166,7 +160,6 @@ APP_CONTENTS_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 APP_ROOT="${APP_CONTENTS_DIR}/Resources/app"
 SUPPORT_DIR="${HOME}/Library/Application Support/MedDRA Browser Mac"
 DATA_DIR="${SUPPORT_DIR}/data"
-DICT_DIR="${SUPPORT_DIR}/dictionaries"
 LOG_DIR="${HOME}/Library/Logs/MedDRA Browser Mac"
 SERVER_LOG="${LOG_DIR}/server.log"
 PID_FILE="${SUPPORT_DIR}/server.pid"
@@ -175,7 +168,7 @@ HOST="127.0.0.1"
 PORT="${MEDDRA_BROWSER_PORT:-8765}"
 URL="http://${HOST}:${PORT}/"
 
-mkdir -p "${DATA_DIR}" "${DICT_DIR}" "${LOG_DIR}"
+mkdir -p "${DATA_DIR}" "${LOG_DIR}"
 touch "${SERVER_LOG}"
 
 notify() {
@@ -218,16 +211,6 @@ if [ "${RUNTIME_PY}" != "${VENDOR_PY}" ] || [ "${RUNTIME_ARCH}" != "${VENDOR_ARC
 fi
 
 echo "[$(date '+%Y-%m-%d %H:%M:%S')] python=${PYTHON_CMD[*]} runtime=${RUNTIME_PY}/${RUNTIME_ARCH} vendor=${VENDOR_PY}/${VENDOR_ARCH}" >> "${SERVER_LOG}"
-
-if [ -z "${MEDDRA_SOURCE_ROOT:-}" ]; then
-  if [ -d "${DICT_DIR}" ] && find "${DICT_DIR}" -name soc.asc -print -quit | grep -q .; then
-    export MEDDRA_SOURCE_ROOT="${DICT_DIR}"
-  elif [ -d "${APP_ROOT}/dictionaries" ] && find "${APP_ROOT}/dictionaries" -name soc.asc -print -quit | grep -q .; then
-    export MEDDRA_SOURCE_ROOT="${APP_ROOT}/dictionaries"
-  elif [ -d "${HOME}/Documents/MedDRA" ]; then
-    export MEDDRA_SOURCE_ROOT="${HOME}/Documents/MedDRA"
-  fi
-fi
 
 export MEDDRA_BROWSER_STATE_DIR="${DATA_DIR}"
 export PYTHONPATH="${VENDOR_DIR}:${APP_ROOT}/backend"
