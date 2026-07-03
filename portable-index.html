@@ -90,14 +90,14 @@
       async function checkServer() {
         const status = document.getElementById("status");
         try {
-          const response = await fetch("http://127.0.0.1:8765/api/status", { cache: "no-store" });
+          const response = await fetch("http://127.0.0.1:8765/api/source-roots", { cache: "no-store" });
           if (response.ok) {
             status.textContent = "本地服务已启动，正在打开浏览器界面...";
             window.location.href = "http://127.0.0.1:8765/";
             return;
           }
-          status.textContent = "本地服务已启动。系统还没有绑定词典文件夹，正在打开设置页...";
-          window.location.href = "http://127.0.0.1:8765/";
+          status.textContent = "本地服务暂时不可用。" + platformStepText();
+          window.setTimeout(checkServer, 2000);
         } catch (error) {
           status.textContent = "还没有检测到本地服务。" + platformStepText();
           window.setTimeout(checkServer, 2000);
@@ -119,11 +119,11 @@
       <div class="steps">
         <div class="step">
           <strong>第一步：启动本地服务</strong>
-          Windows 双击 <code>【Windows】第一步：请双击我运行.bat</code>。Mac 双击 <code>【Mac】第一步：请双击我运行.command</code>。
+          Windows 双击 <code>【Windows】第一步：请双击我运行.bat</code>。Mac 双击 <code>【Mac】第一步：请双击我运行.command</code>。请保持第一步打开的窗口不要关闭。
         </div>
         <div class="step">
           <strong>第二步：打开浏览器入口</strong>
-          双击 <code>第二步：双击我开始MedDRA浏览.html</code>。如果服务已经启动，本页会自动进入系统。
+          第一运行窗口会在服务启动后自动打开页面。如果没有自动打开，再双击 <code>第二步：双击我开始MedDRA浏览.html</code>。如果服务已经启动，本页会自动进入系统。
         </div>
       </div>
       <p>进入系统后，如果提示还没有词典，请点“选择词典文件夹”。在文件管理器或 Finder 里选你的 MedDRA 文件夹即可，比如 MedDRA_29_0_Chinese、MedDRA_29_0_English、MedAscii、ascii-290，或它们的上级文件夹。</p>

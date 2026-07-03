@@ -36,15 +36,16 @@
 Windows：
 
 1. 双击 `【Windows】第一步：请双击我运行.bat`。
-2. 等黑色窗口提示服务启动。第一次运行可能会安装依赖，时间会久一点。
-3. 双击 `第二步：双击我开始MedDRA浏览.html`。
+2. 等黑色窗口准备运行环境并启动服务。第一次运行可能会安装依赖，时间会久一点。
+3. 服务启动后会自动打开页面。如果没有自动打开，再双击 `第二步：双击我开始MedDRA浏览.html`。
 4. 进入页面后，点“设置”里的“选择词典文件夹”，选择你的 MedDRA 文件夹。
 
 Mac：
 
 1. 双击 `【Mac】第一步：请双击我运行.command`。
-2. 如果浏览器没有自动打开，再双击 `第二步：双击我开始MedDRA浏览.html`。
-3. 进入页面后，点“设置”里的“选择词典文件夹”，选择你的 MedDRA 文件夹。
+2. 等终端窗口准备运行环境并启动服务。第一次运行可能会安装依赖，时间会久一点。
+3. 服务启动后会自动打开页面。如果没有自动打开，再双击 `第二步：双击我开始MedDRA浏览.html`。
+4. 进入页面后，点“设置”里的“选择词典文件夹”，选择你的 MedDRA 文件夹。
 
 便携版打开后会在浏览器里运行。使用时不要急着关闭第一步打开的命令窗口；不用了再关。
 
@@ -155,4 +156,4 @@ Download `meddra-browser-mac-app.zip` for Mac, or `meddra-browser-portable.zip` 
 
 Mac App: unzip, move the app to Applications, open it, then choose your MedDRA dictionary folder from Settings.
 
-Portable package: run the step 1 launcher for your operating system, then open `第二步：双击我开始MedDRA浏览.html`. If no dictionary is loaded, use Settings to select a MedDRA release folder, a `MedAscii` folder, an `ascii-*` folder, or their parent folder.
+Portable package: run the step 1 launcher for your operating system. The launcher starts the local service and opens the browser entry after the service is ready. If the browser does not open automatically, open `第二步：双击我开始MedDRA浏览.html`. If no dictionary is loaded, use Settings to select a MedDRA release folder, a `MedAscii` folder, an `ascii-*` folder, or their parent folder.

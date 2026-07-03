@@ -6,6 +6,7 @@ cd /d "%~dp0"
 set HOST=127.0.0.1
 if "%MEDDRA_BROWSER_PORT%"=="" set MEDDRA_BROWSER_PORT=8765
 set PORT=%MEDDRA_BROWSER_PORT%
+set PYTHONUTF8=1
 
 if "%MEDDRA_SOURCE_ROOT%"=="" (
   if exist "%CD%\dictionaries" (
@@ -46,14 +47,9 @@ if %ERRORLEVEL% neq 0 (
 )
 
 set PYTHONPATH=%CD%\backend
-if exist "%CD%\第二步：双击我开始MedDRA浏览.html" (
-  start "" /max "%CD%\第二步：双击我开始MedDRA浏览.html"
-) else (
-  start "" /max "%CD%\index.html"
-)
 
-echo MedDRA Browser is running at http://%HOST%:%PORT%/
-echo Keep this window open while using the browser. Press Ctrl+C to stop.
-".venv_windows\Scripts\python.exe" -m uvicorn app.main:app --host %HOST% --port %PORT%
+echo Starting MedDRA Browser at http://%HOST%:%PORT%/
+echo Keep this window open while using the browser. Close it when you are done.
+".venv_windows\Scripts\python.exe" scripts\run_portable_server.py
 
 pause

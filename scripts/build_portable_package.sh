@@ -17,6 +17,7 @@ find "${PACKAGE_ROOT}/backend/app" -name "__pycache__" -type d -prune -exec rm -
 cp backend/requirements.txt "${PACKAGE_ROOT}/backend/requirements.txt"
 cp -R frontend/dist "${PACKAGE_ROOT}/frontend/dist"
 cp scripts/start_meddra_server.sh "${PACKAGE_ROOT}/scripts/start_meddra_server.sh"
+cp scripts/run_portable_server.py "${PACKAGE_ROOT}/scripts/run_portable_server.py"
 cp start_windows.bat "${PACKAGE_ROOT}/start_windows.bat"
 cp portable-index.html "${PACKAGE_ROOT}/index.html"
 cp portable-index.html "${PACKAGE_ROOT}/第二步：双击我开始MedDRA浏览.html"
@@ -24,14 +25,12 @@ cp README.md "${PACKAGE_ROOT}/README.md"
 cp LICENSE.md "${PACKAGE_ROOT}/LICENSE.md"
 
 cp start_windows.bat "${PACKAGE_ROOT}/【Windows】第一步：请双击我运行.bat"
+perl -0pi -e 's/\r?\n/\r\n/g' "${PACKAGE_ROOT}/start_windows.bat" "${PACKAGE_ROOT}/【Windows】第一步：请双击我运行.bat"
 cat > "${PACKAGE_ROOT}/【Mac】第一步：请双击我运行.command" <<'CMD'
 #!/bin/zsh
 set -eu
 cd "$(dirname "$0")"
 ./scripts/start_meddra_server.sh
-open "第二步：双击我开始MedDRA浏览.html"
-echo
-echo "MedDRA Browser 已启动。这个终端窗口可以先放着；不用时可以关闭。"
 CMD
 
 cat > "${PACKAGE_ROOT}/请先看我.txt" <<'TXT'
@@ -39,13 +38,14 @@ cat > "${PACKAGE_ROOT}/请先看我.txt" <<'TXT'
 
 Windows：
 1. 双击【Windows】第一步：请双击我运行.bat
-2. 双击 第二步：双击我开始MedDRA浏览.html
+2. 第一运行窗口会在服务启动后自动打开页面；如果没有自动打开，再双击 第二步：双击我开始MedDRA浏览.html
 
 Mac：
 1. 双击【Mac】第一步：请双击我运行.command
-2. 如果浏览器没有自动打开，再双击 第二步：双击我开始MedDRA浏览.html
+2. 第一运行窗口会在服务启动后自动打开页面；如果没有自动打开，再双击 第二步：双击我开始MedDRA浏览.html
 
 打开页面后，如果系统提示还没有词典，请点“选择词典文件夹”，在文件管理器或 Finder 里选择你的 MedDRA 文件夹。可以选 MedDRA_29_0_Chinese、MedDRA_29_0_English、MedAscii、ascii-290，或者它们的上级文件夹。
+使用时请保持第一步打开的窗口不要关闭；不用时关闭窗口即可停止服务。
 TXT
 
 chmod +x "${PACKAGE_ROOT}/scripts/start_meddra_server.sh"
