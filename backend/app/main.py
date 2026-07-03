@@ -29,7 +29,7 @@ from .meddra_data import (
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 FRONTEND_DIST = PROJECT_ROOT / "frontend" / "dist"
 
-app = FastAPI(title="MedDRA Browser Mac", version="0.1.8")
+app = FastAPI(title="MedDRA Browser Mac", version="0.1.9")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:5173", "http://127.0.0.1:5173", "null"],

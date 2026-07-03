@@ -12,6 +12,7 @@
 
 - `meddra-browser-mac-app.zip`：Mac 用户优先用这个。
 - `meddra-browser-portable.zip`：Windows 和 Mac 都能用。适合不想安装 App，或想放在 U 盘、移动硬盘里用。
+- `MedDRA-Browser-Windows-Emergency-v0.1.9.zip`：Windows 同事临时应急优先用这个。它和便携版功能一致，文件名更直观，并且包内带 Windows 运行环境。
 
 ## Mac App 用法
 
@@ -36,7 +37,7 @@
 Windows：
 
 1. 双击 `【Windows】第一步：请双击我运行.bat`。
-2. 等黑色窗口准备运行环境并启动服务。第一次运行可能会安装依赖，时间会久一点。
+2. 等黑色窗口准备运行环境并启动服务。第一次运行会在本文件夹下准备 `.python_windows` 和 `.venv_windows`，不需要你单独安装 Python，也不会把 Python 加到系统 PATH。
 3. 服务启动后会自动打开页面。如果没有自动打开，再双击 `第二步：双击我开始MedDRA浏览.html`。
 4. 进入页面后，点“设置”里的“选择词典文件夹”，选择你的 MedDRA 文件夹。
 
@@ -96,7 +97,11 @@ smq_content.asc
 
 ### Windows 第一次运行很慢
 
-第一次会准备 Python 运行环境并安装依赖。等它跑完，不要关窗口。
+第一次会在便携包文件夹里准备本地 Python 运行环境并安装后端依赖。等它跑完，不要关窗口。以后再打开会快很多。
+
+### Windows 必须提前安装 Python 3.10 吗
+
+不需要。当前程序支持 Python 3.9 或更新版本。新版便携包已经内置 Windows x64 Python 安装器；双击第一步文件后，它会优先使用包内运行环境。旧包里出现的 “Install Python 3.10 or later” 是启动脚本提示不准确，不代表程序必须用 3.10。
 
 ### Mac 提示无法打开 App
 

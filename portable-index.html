@@ -79,7 +79,7 @@
         const platform = navigator.platform || "";
         const ua = navigator.userAgent || "";
         if (/Win/i.test(platform) || /Windows/i.test(ua)) {
-          return "请先双击【Windows】第一步：请双击我运行.bat。";
+          return "请先双击【Windows】第一步：请双击我运行.bat；第一次会自动准备本地 Python 运行环境。";
         }
         if (/Mac/i.test(platform) || /Mac OS/i.test(ua)) {
           return "请先双击【Mac】第一步：请双击我运行.command。";
@@ -119,7 +119,7 @@
       <div class="steps">
         <div class="step">
           <strong>第一步：启动本地服务</strong>
-          Windows 双击 <code>【Windows】第一步：请双击我运行.bat</code>。Mac 双击 <code>【Mac】第一步：请双击我运行.command</code>。请保持第一步打开的窗口不要关闭。
+          Windows 双击 <code>【Windows】第一步：请双击我运行.bat</code>；第一次会在本文件夹下准备本地 Python 运行环境，不需要另外安装 Python。Mac 双击 <code>【Mac】第一步：请双击我运行.command</code>。请保持第一步打开的窗口不要关闭。
         </div>
         <div class="step">
           <strong>第二步：打开浏览器入口</strong>
