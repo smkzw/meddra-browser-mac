@@ -1,9 +1,14 @@
 from __future__ import annotations
 
+import os
+from pathlib import Path
 import unittest
 from unittest.mock import patch
 
 from fastapi.testclient import TestClient
+
+if not os.environ.get("MEDDRA_SOURCE_ROOT"):
+    os.environ["MEDDRA_SOURCE_ROOT"] = str(Path(__file__).resolve().parents[3])
 
 from app.main import app
 
@@ -159,6 +164,7 @@ class ApiManualCoverageTests(unittest.TestCase):
         roots = self.client.get("/api/source-roots").json()
         self.assertIn("roots", roots)
         self.assertFalse(any("path" in row for row in roots["roots"]))
+        self.assertFalse(any(str(row.get("label", "")).startswith("词典来源") for row in roots["roots"]))
 
         bad = self.client.post("/api/source-roots", json={"path": "/definitely/not/a/meddra/source"})
         self.assertEqual(bad.status_code, 400)

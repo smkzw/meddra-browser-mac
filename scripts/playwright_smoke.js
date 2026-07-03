@@ -235,6 +235,13 @@ export default async function runMeddraSmoke(page) {
   await page.getByRole("button", { name: "设置" }).click();
   await ensureVisible("绑定 MedDRA 词典文件夹", page.getByText("绑定 MedDRA 词典文件夹"));
   await ensureVisible("导入文件提示", page.getByText("mdhier.asc"));
+  const settingsText = await page.locator(".settings-panel").textContent();
+  if ((settingsText || "").includes("词典来源 1") || (settingsText || "").includes("词典来源 2")) {
+    throw new Error("设置页仍显示内部词典来源编号");
+  }
+  if (!(settingsText || "").includes("MedDRA 29.0")) {
+    throw new Error("设置页未显示已识别的 MedDRA 版本");
+  }
   const synonymResponse = page.waitForResponse((response) => response.url().includes("/api/synonyms") && response.ok());
   await page.getByRole("button", { name: "查看中文同义词表" }).click();
   await synonymResponse;

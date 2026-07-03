@@ -204,6 +204,33 @@ def run(page: Page) -> list[str]:
     assert all(("双语" in item or "仅中文" in item or "仅英文" in item) for item in options), options
     checks.append("version selector includes language labels")
 
+    version_values = page.locator(".version-select option").evaluate_all("(nodes) => nodes.map((node) => node.value)")
+    for value in version_values[:4]:
+        page.locator(".version-select").select_option(value)
+        page.wait_for_function(
+            """(version) => {
+              const select = document.querySelector(".version-select");
+              const notice = document.querySelector(".status-notice");
+              return select && select.value === version && !notice;
+            }""",
+            arg=value,
+            timeout=60000,
+        )
+        if page.locator(".toast").count():
+            toast_text = page.locator(".toast").inner_text()
+            assert "本地词典" not in toast_text and "失败" not in toast_text and "错误" not in toast_text, toast_text
+    if "29.0" in version_values:
+        page.locator(".version-select").select_option("29.0")
+        page.wait_for_function(
+            """() => {
+              const select = document.querySelector(".version-select");
+              const notice = document.querySelector(".status-notice");
+              return select && select.value === "29.0" && !notice;
+            }""",
+            timeout=60000,
+        )
+    checks.append("version switching uses loading notice without error toast")
+
     expect(page.locator(".level-filter button.active", has_text="PT")).to_be_visible()
     expect(page.locator(".level-filter button", has_text="SMQ")).to_be_visible()
     OUTPUT.mkdir(parents=True, exist_ok=True)
@@ -323,6 +350,8 @@ def run(page: Page) -> list[str]:
     expect(page.get_by_placeholder("找不到选择窗口时，可把词典文件夹路径粘贴到这里")).to_be_visible()
     settings_text = page.locator(".settings-panel").text_content() or ""
     assert "/Users/" not in settings_text and ".sqlite" not in settings_text, settings_text
+    assert "词典来源 1" not in settings_text and "词典来源 2" not in settings_text, settings_text
+    assert "MedDRA 29.0" in settings_text, settings_text
     with page.expect_response(lambda response: "/api/synonyms" in response.url and response.ok):
         page.get_by_role("button", name="查看中文同义词表").click()
     expect(page.locator(".synonym-status")).to_contain_text(re.compile(r"已载入|未找到"))

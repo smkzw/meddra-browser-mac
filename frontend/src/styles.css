@@ -59,6 +59,12 @@ button { border: 0; cursor: pointer; }
   color: #24322d;
   background: #ffffff;
 }
+.status-notice {
+  max-width: 360px;
+  color: #52645d;
+  font-size: 12px;
+  line-height: 1.35;
+}
 
 .segmented, .pane-tabs, .module-nav {
   display: flex;

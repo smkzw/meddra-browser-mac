@@ -13,10 +13,6 @@ VENV_DIR="${REPO_DIR}/.venv_macos"
 mkdir -p "${LOG_DIR}"
 cd "${REPO_DIR}"
 
-if [ -z "${MEDDRA_SOURCE_ROOT:-}" ] && [ -d "${REPO_DIR}/dictionaries" ]; then
-  export MEDDRA_SOURCE_ROOT="${REPO_DIR}/dictionaries"
-fi
-
 if ! command -v python3 >/dev/null 2>&1; then
   echo "未找到 python3。请先安装 Python 3.9 或更新版本，然后重新运行第一步入口。" >&2
   exit 1

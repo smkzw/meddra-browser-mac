@@ -8,12 +8,6 @@ if "%MEDDRA_BROWSER_PORT%"=="" set MEDDRA_BROWSER_PORT=8765
 set PORT=%MEDDRA_BROWSER_PORT%
 set PYTHONUTF8=1
 
-if "%MEDDRA_SOURCE_ROOT%"=="" (
-  if exist "%CD%\dictionaries" (
-    set MEDDRA_SOURCE_ROOT=%CD%\dictionaries
-  )
-)
-
 where py >nul 2>nul
 if %ERRORLEVEL%==0 (
   set PYTHON_CMD=py -3

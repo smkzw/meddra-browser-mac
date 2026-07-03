@@ -222,6 +222,40 @@ function apiPath(path: string, version?: string) {
   return `${API}${path}${separator}version=${encodeURIComponent(version)}`;
 }
 
+function versionSortKey(versionValue: string) {
+  const match = versionValue.match(/(\d+)\.(\d+)/);
+  if (!match) return [0, 0];
+  return [Number(match[1]), Number(match[2])];
+}
+
+function sortReleases(releases: ReleaseInfo[]) {
+  return [...releases].sort((a, b) => {
+    const [majorA, minorA] = versionSortKey(a.version);
+    const [majorB, minorB] = versionSortKey(b.version);
+    return majorB - majorA || minorB - minorA;
+  });
+}
+
+function mergeReleases(releases: ReleaseInfo[]) {
+  const merged = new Map<string, ReleaseInfo>();
+  releases.forEach((release) => {
+    const current = merged.get(release.version);
+    if (!current) {
+      merged.set(release.version, { ...release, available_languages: [...(release.available_languages || [])] });
+      return;
+    }
+    const languages = Array.from(new Set([...(current.available_languages || []), ...(release.available_languages || [])]));
+    merged.set(release.version, {
+      ...current,
+      complete: current.complete || release.complete || (languages.includes("en") && languages.includes("zh")),
+      usable: current.usable || release.usable,
+      available_languages: languages,
+      missing_languages: ["en", "zh"].filter((lang) => !languages.includes(lang))
+    });
+  });
+  return sortReleases(Array.from(merged.values()));
+}
+
 function apiErrorMessage(data: unknown, fallback: string) {
   if (data && typeof data === "object") {
     const row = data as Record<string, unknown>;
@@ -229,6 +263,10 @@ function apiErrorMessage(data: unknown, fallback: string) {
     if (typeof detail === "string" && detail.trim()) return detail;
   }
   return fallback;
+}
+
+function isMissingDictionaryMessage(message: string) {
+  return message.includes("未发现可用的MedDRA") || message.includes("加入词典来源") || message.includes("还没有发现可用词典");
 }
 
 async function readJsonResponse(res: Response) {
@@ -320,6 +358,8 @@ export default function App() {
   const [detail, setDetail] = useState<Detail | null>(null);
   const [smqDetail, setSmqDetail] = useState<SmqDetail | null>(null);
   const [loading, setLoading] = useState(false);
+  const [statusLoading, setStatusLoading] = useState(false);
+  const [statusNotice, setStatusNotice] = useState("");
   const [toast, setToast] = useState("");
   const [includeSynonyms, setIncludeSynonyms] = useState(true);
   const [ignoreDiacritics, setIgnoreDiacritics] = useState(true);
@@ -358,15 +398,52 @@ export default function App() {
 
   useEffect(() => {
     if (mobileWorkspace) return;
-    fetchJson<Status>(apiPath("/status", version), undefined, "后端未找到可用的MedDRA词典目录")
-      .then((data) => {
-        setStatus(data);
-        if (!version) setVersion(data.version);
-      })
-      .catch((error) => {
-        setModule("settings");
-        setToast((error as Error).message || "后端未启动或索引不可用");
-      });
+    let cancelled = false;
+    let timer: number | undefined;
+    const targetVersion = version;
+    const maxAttempts = targetVersion ? 40 : 1;
+    setStatusLoading(true);
+    setStatusNotice(targetVersion ? `正在载入 MedDRA ${targetVersion}，首次切换可能需要解析索引...` : "正在载入本地 MedDRA 词典...");
+
+    const loadStatus = (attempt = 0) => {
+      fetchJson<Status>(apiPath("/status", targetVersion), undefined, "后端未找到可用的MedDRA词典目录")
+        .then((data) => {
+          if (cancelled) return;
+          setStatus(data);
+          if (!targetVersion) setVersion(data.version);
+          setStatusLoading(false);
+          setStatusNotice("");
+        })
+        .catch((error) => {
+          if (cancelled) return;
+          const message = (error as Error).message || "";
+          if (isMissingDictionaryMessage(message)) {
+            setStatusLoading(false);
+            setModule("settings");
+            setStatusNotice("还没有绑定 MedDRA 词典，请在设置中选择词典文件夹。");
+            return;
+          }
+          if (attempt + 1 < maxAttempts) {
+            setStatusNotice(`正在解析 MedDRA ${targetVersion}，请稍候...`);
+            timer = window.setTimeout(() => loadStatus(attempt + 1), 1200);
+            return;
+          }
+          setStatusLoading(false);
+          if (targetVersion) {
+            setStatusNotice(`MedDRA ${targetVersion} 暂时未载入完成，可稍后重试或在设置中重建当前版本。`);
+            flash(message || `MedDRA ${targetVersion} 载入失败`);
+          } else {
+            setModule("settings");
+            setStatusNotice("还没有发现可用词典，请在设置中选择 MedDRA 词典文件夹。");
+          }
+        });
+    };
+
+    loadStatus();
+    return () => {
+      cancelled = true;
+      if (timer) window.clearTimeout(timer);
+    };
   }, [version, mobileWorkspace]);
 
   useEffect(() => {
@@ -375,14 +452,14 @@ export default function App() {
   }, [mobileWorkspace]);
 
   useEffect(() => {
-    if (!version || mobileWorkspace) return;
+    if (!version || mobileWorkspace || status?.version !== version) return;
     fetchJson<{ nodes: TreeNode[] }>(apiPath(`/tree/soc?mode=${mode}`, version), undefined, "SOC层级加载失败")
       .then((data) => setSocRoots(data.nodes || []))
       .catch((error) => flash((error as Error).message));
     fetchJson<{ nodes: TreeNode[] }>(apiPath(`/tree/smq?mode=${mode}`, version), undefined, "SMQ层级加载失败")
       .then((data) => setSmqRoots(data.nodes || []))
       .catch((error) => flash((error as Error).message));
-  }, [mode, version, mobileWorkspace]);
+  }, [mode, version, status?.version, mobileWorkspace]);
 
   useEffect(() => {
     writeStorage("meddra.bin", bin);
@@ -413,6 +490,8 @@ export default function App() {
 
   const flattenedSearchRows = useMemo(() => searchGroups.flatMap((group) => group.results), [searchGroups]);
   const binKeys = useMemo(() => new Set(bin.map((row) => `${row.level}:${row.code}`)), [bin]);
+  const sourceReleases = useMemo(() => mergeReleases(sourceRoots.flatMap((root) => root.releases || [])), [sourceRoots]);
+  const versionReady = Boolean(version && status?.version === version);
   const workspaceStyle = {
     "--left-pane-width": `${paneWidths.left}px`,
     "--right-pane-width": `${paneWidths.right}px`,
@@ -778,7 +857,7 @@ export default function App() {
           <img src="/brand/app-icon-256.png" alt="" aria-hidden="true" />
           <div>
             <h1>MedDRA Browser Mac</h1>
-            <span>本地词典浏览 · 中文界面 · MedDRA {status?.version || version || "自动选择"}</span>
+            <span>本地词典浏览 · 中文界面 · MedDRA {version || status?.version || "自动选择"}</span>
           </div>
         </div>
         <div className="window-tip">建议最大化窗口后使用</div>
@@ -787,6 +866,7 @@ export default function App() {
             className="version-select"
             value={version}
             title="选择MedDRA版本"
+            disabled={statusLoading}
             onChange={(event) => {
               setVersion(event.target.value);
               setExpanded({});
@@ -795,12 +875,14 @@ export default function App() {
               setSmqDetail(null);
             }}
           >
+            {!status?.available_versions?.length && <option value="">未绑定词典</option>}
             {status?.available_versions?.map((release) => (
               <option key={release.version} value={release.version}>
                 MedDRA {release.version}（{releaseLanguageLabel(release)}）
               </option>
             ))}
           </select>
+          {statusNotice && <span className="status-notice">{statusNotice}</span>}
           <div className="segmented" aria-label="数据库显示模式">
             {(["zh", "en", "both"] as Mode[]).map((item) => (
               <button key={item} className={mode === item ? "active" : ""} onClick={() => setMode(item)}>
@@ -876,8 +958,8 @@ export default function App() {
           {module === "search" && (
             <section className="module">
               <div className="query-bar">
-                <input value={query} onChange={(event) => setQuery(event.target.value)} onKeyDown={(event) => event.key === "Enter" && performSearch()} placeholder={SEARCH_PLACEHOLDER} />
-                <button className="primary" onClick={() => performSearch()} disabled={loading}>
+                <input value={query} onChange={(event) => setQuery(event.target.value)} onKeyDown={(event) => event.key === "Enter" && versionReady && performSearch()} placeholder={SEARCH_PLACEHOLDER} />
+                <button className="primary" onClick={() => performSearch()} disabled={loading || !versionReady}>
                   <Search size={16} /> 搜索
                 </button>
                 <button onClick={cancelSearch} disabled={!loading}>
@@ -939,7 +1021,7 @@ export default function App() {
                   <option value="ends">结尾为</option>
                 </select>
                 <input value={advB} onChange={(event) => setAdvB(event.target.value)} placeholder={ADVANCED_PLACEHOLDER} />
-                <button className="primary" onClick={performAdvancedSearch}>
+                <button className="primary" onClick={performAdvancedSearch} disabled={!versionReady || loading}>
                   <Search size={16} /> 高级搜索
                 </button>
               </div>
@@ -1063,13 +1145,19 @@ export default function App() {
                   </div>
                 ))}
               </div>
-              <div className="source-root-list">
-                {sourceRoots.map((root) => (
-                  <div key={root.id || root.label}>
-                    <strong>{root.label || "词典来源"}</strong>
-                    <span>{root.exists ? `${root.release_count} 个版本` : "路径不可用"}</span>
+              <div className="source-root-list" aria-label="已识别MedDRA版本">
+                {sourceReleases.map((release) => (
+                  <div key={release.version}>
+                    <strong>MedDRA {release.version}</strong>
+                    <span>{releaseLanguageLabel(release)}</span>
                   </div>
                 ))}
+                {sourceRoots.some((root) => !root.exists) && (
+                  <div>
+                    <strong>有词典文件夹不可读取</strong>
+                    <span>请重新选择词典文件夹</span>
+                  </div>
+                )}
               </div>
             </section>
           )}

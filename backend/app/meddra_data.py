@@ -134,19 +134,25 @@ def default_source_config(version: str | None = None, root: Path | None = None) 
 
 
 def default_med_root() -> Path:
+    roots = explicit_source_roots()
+    if roots:
+        return roots[0]
+    return Path(__file__).resolve().parents[2] / "dictionaries"
+
+
+def explicit_source_roots() -> list[Path]:
+    roots: list[Path] = []
     env_root = os.environ.get("MEDDRA_SOURCE_ROOT")
     if env_root:
-        return Path(env_root).expanduser()
-    project_root = Path(__file__).resolve().parents[2]
-    portable_root = project_root / "dictionaries"
-    app_support_root = Path.home() / "Library" / "Application Support" / "MedDRA Browser Mac" / "dictionaries"
-    documents_root = Path.home() / "Documents" / "MedDRA"
-    for candidate in [portable_root, app_support_root, documents_root]:
-        if contains_meddra_ascii(candidate):
-            return candidate
-    if portable_root.exists():
-        return portable_root
-    return app_support_root
+        for raw in env_root.split(os.pathsep):
+            if raw.strip():
+                roots.append(Path(raw.strip()).expanduser())
+    roots.extend(load_source_roots())
+    unique: list[Path] = []
+    for item in roots:
+        if item not in unique:
+            unique.append(item)
+    return unique
 
 
 def contains_meddra_ascii(root: Path) -> bool:
@@ -231,7 +237,7 @@ def load_source_roots() -> list[Path]:
 
 
 def configured_source_roots(root: Path | None = None) -> list[Path]:
-    roots = [root or default_med_root(), *load_source_roots()]
+    roots = [root.expanduser()] if root is not None else explicit_source_roots()
     unique: list[Path] = []
     for item in roots:
         resolved = item.expanduser()
@@ -247,7 +253,7 @@ def add_source_root(path: str) -> Path:
     if not discover_releases(candidate):
         raise RuntimeError("未在所选文件夹或其子文件夹中发现可用的MedDRA ASCII词典目录")
     roots = load_source_roots()
-    if candidate not in roots and candidate != default_med_root():
+    if candidate not in roots:
         roots.append(candidate)
     source_roots_file().parent.mkdir(parents=True, exist_ok=True)
     source_roots_file().write_text(
@@ -261,10 +267,11 @@ def source_roots_status() -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     for index, root in enumerate(configured_source_roots(), start=1):
         releases = discover_releases(root)
+        label = "、".join(f"MedDRA {release.version}" for release in releases) or "未识别到MedDRA版本"
         rows.append(
             {
                 "id": f"source-{index}",
-                "label": f"词典来源 {index}",
+                "label": label,
                 "exists": root.exists(),
                 "release_count": len(releases),
                 "releases": [release.as_dict() for release in releases],

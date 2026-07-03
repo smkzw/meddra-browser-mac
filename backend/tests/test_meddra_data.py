@@ -1,8 +1,13 @@
 from __future__ import annotations
 
+import os
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest.mock import patch
+
+if not os.environ.get("MEDDRA_SOURCE_ROOT"):
+    os.environ["MEDDRA_SOURCE_ROOT"] = str(Path(__file__).resolve().parents[3])
 
 from app.meddra_data import (
     REQUIRED_ASC_FILES,
@@ -44,6 +49,14 @@ class MeddraDataTests(unittest.TestCase):
         self.assertIn("29.0", releases)
         self.assertTrue(releases["29.0"].complete)
         self.assertTrue(default_source_config("29.0").db_path.name.endswith(f"{version_slug('29.0')}.sqlite"))
+
+    def test_clean_install_has_no_implicit_dictionary_binding(self) -> None:
+        with TemporaryDirectory() as tmp:
+            with patch.dict(os.environ, {"MEDDRA_BROWSER_STATE_DIR": tmp}, clear=False):
+                os.environ.pop("MEDDRA_SOURCE_ROOT", None)
+                self.assertEqual(discover_releases(), [])
+                with self.assertRaisesRegex(RuntimeError, "未发现可用的MedDRA"):
+                    default_source_config()
 
     def test_release_discovery_allows_single_language_release(self) -> None:
         with TemporaryDirectory() as tmp:
