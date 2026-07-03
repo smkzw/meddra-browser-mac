@@ -100,14 +100,14 @@ intl_ord.asc
 1. 环境变量 `MEDDRA_SOURCE_ROOT`。
 2. macOS App 的 `~/Library/Application Support/MedDRA Browser Mac/dictionaries/`。
 3. App/便携包内的 `dictionaries/`，仅在其中实际包含 MedDRA ASCII 文件时启用。
-4. 项目上级 MedDRA 工作目录。
-5. macOS App 启动器还会自动尝试 `~/Documents/指导原则及临床试验规范合集/MedDRA` 和 `~/Documents/MedDRA`，但双击 App 时这些位置可能受 macOS 隐私权限限制。
+4. `~/Documents/MedDRA`。
+5. 运行后也可在“设置”中点击“加入来源”，通过 Finder/Windows 文件夹选择器添加词典目录或其上级目录。
 
 同义词表默认从以下位置发现：
 
 1. 环境变量 `MEDDRA_SYNONYM_ROOT`。
-2. `dictionaries/MDB41_D241_B123/`。
-3. 数据源目录附近的 `MDB41_D241_B123/`。
+2. 词典目录、词典父级目录及其附近的 `MDB4/`、`MDB41_D241_B123/` 等 MDB 同义词目录。
+3. App/便携包内 `dictionaries/` 附近的 MDB 同义词目录。
 
 SQLite 缓存按版本写入 `backend/data/`，例如：
 
@@ -401,7 +401,7 @@ python3 -m playwright install chromium
 
 Set `MEDDRA_SOURCE_ROOT` to the folder containing licensed MedDRA ASCII releases, or place releases in the portable `dictionaries/` folder.
 
-The macOS app first checks `~/Library/Application Support/MedDRA Browser Mac/dictionaries/`. A bundled `dictionaries/` folder is only treated as a source when it actually contains MedDRA ASCII files. The app launcher also checks `~/Documents/指导原则及临床试验规范合集/MedDRA` and `~/Documents/MedDRA`, but direct double-click launch may be blocked by macOS privacy controls when reading Documents.
+The macOS app first checks `~/Library/Application Support/MedDRA Browser Mac/dictionaries/`. A bundled `dictionaries/` folder is only treated as a source when it actually contains MedDRA ASCII files. The app launcher also checks `~/Documents/MedDRA`. You can also use Settings to add a dictionary folder or its parent folder through Finder or the Windows folder picker.
 
 Required files include `soc.asc`, `pt.asc`, `llt.asc`, `mdhier.asc`, `smq_list.asc`, and `smq_content.asc` plus the relationship files listed in the Chinese section above.
 

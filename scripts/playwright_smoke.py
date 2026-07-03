@@ -4,12 +4,14 @@ import os
 import re
 from pathlib import Path
 
-from playwright.sync_api import Page, expect, sync_playwright
+from playwright.sync_api import Browser, Page, expect, sync_playwright
 
 
 ROOT = Path(__file__).resolve().parents[1]
 OUTPUT = ROOT / "output" / "playwright"
 APP_URL = os.environ.get("MEDDRA_BROWSER_URL", "http://127.0.0.1:8765/")
+SEARCH_PLACEHOLDER = "可输入AE/MH名称进行模糊查询或输入代码进行精确查询"
+ADVANCED_PLACEHOLDER = "可输入AE/MH名称、中文/英文片段或代码"
 
 
 def check_result_layout(page: Page, label: str) -> None:
@@ -134,7 +136,7 @@ def drag_pane(page: Page, side: str, delta: int) -> None:
 
 def ensure_search_results(page: Page) -> None:
     page.get_by_role("navigation").get_by_role("button", name="搜索", exact=True).click()
-    search = page.get_by_placeholder("输入术语、中文片段、英文拼写或代码")
+    search = page.get_by_placeholder(SEARCH_PLACEHOLDER)
     search.fill("横纹肌")
     page.locator(".center-pane .query-bar button.primary").click()
     expect(page.locator(".result-group", has_text="包含匹配")).to_be_visible(timeout=15000)
@@ -190,10 +192,11 @@ def run(page: Page) -> list[str]:
     page.reload(wait_until="networkidle")
 
     expect(page.locator(".module-nav button.active", has_text="搜索")).to_be_visible(timeout=15000)
+    expect(page.get_by_text("建议最大化窗口后使用")).to_be_visible()
     expect(page.locator(".brand img")).to_be_visible()
     logo_loaded = page.locator(".brand img").evaluate("(node) => node.complete && node.naturalWidth >= 64")
     assert logo_loaded, "brand logo did not load"
-    checks.append("logo loaded")
+    checks.append("logo and maximized-window tip loaded")
 
     expect(page.locator(".version-select")).to_be_visible()
     options = page.locator(".version-select option").all_text_contents()
@@ -211,7 +214,9 @@ def run(page: Page) -> list[str]:
     page.get_by_role("button", name="双语").click()
     checks.append("database display mode switches")
 
-    search = page.get_by_placeholder("输入术语、中文片段、英文拼写或代码")
+    search = page.get_by_placeholder(SEARCH_PLACEHOLDER)
+    expect(search).to_have_value("")
+    checks.append("search placeholder without example value")
     search.fill("rhabdomyolisys")
     page.locator(".center-pane .query-bar button.primary").click()
     expect(page.get_by_text("模糊候选").first).to_be_visible(timeout=15000)
@@ -225,11 +230,15 @@ def run(page: Page) -> list[str]:
     expect(page.locator(".center-pane .detail-workspace")).to_be_visible()
     expect(page.locator(".right-pane .relationship-tree-node.current", has_text="Rhabdomyolysis")).to_be_visible()
     expect(page.locator(".right-pane .relationship-tree-node", has_text="Musculoskeletal")).to_be_visible()
+    pseudo_line = page.locator(".right-pane .relationship-tree-node.current").first.evaluate(
+        """(node) => getComputedStyle(node, "::before").content"""
+    )
+    assert pseudo_line in ("none", "normal", ""), pseudo_line
     expect(page.locator(".right-pane .relationship-tree-toggle", has_text="直接子级")).to_be_visible()
     page.locator(".right-pane .relationship-tree-toggle", has_text="直接子级").first.click()
     expect(page.locator(".right-pane .relationship-tree-children .relationship-tree-node", has_text="LLT").first).to_be_visible()
     page.screenshot(path=str(OUTPUT / "v3-detail-tree.png"), full_page=True)
-    checks.append("detail and relationship tree")
+    checks.append("detail and relationship tree without connector lines")
 
     page.get_by_role("button", name="搜索", exact=True).click()
     page.locator('.result-actions button[title="加入Research Bin"]').first.click()
@@ -272,6 +281,12 @@ def run(page: Page) -> list[str]:
     checks.extend(check_responsive_matrix(page))
 
     page.get_by_role("button", name="高级搜索").click()
+    advanced_inputs = page.locator(f'input[placeholder="{ADVANCED_PLACEHOLDER}"]')
+    expect(advanced_inputs).to_have_count(2)
+    expect(advanced_inputs.nth(0)).to_have_value("")
+    expect(advanced_inputs.nth(1)).to_have_value("")
+    advanced_inputs.nth(0).fill("renal")
+    advanced_inputs.nth(1).fill("failure")
     page.locator(".advanced-grid button.primary").click()
     expect(page.locator(".result-list .result").first).to_be_visible()
     check_result_layout(page, "advanced search")
@@ -304,21 +319,49 @@ def run(page: Page) -> list[str]:
     page.get_by_role("button", name="设置").click()
     expect(page.get_by_text("词典来源导入")).to_be_visible()
     expect(page.get_by_text("mdhier.asc")).to_be_visible()
+    expect(page.get_by_role("button", name="加入来源")).to_be_visible()
+    expect(page.get_by_placeholder("也可手动粘贴词典文件夹路径")).to_be_visible()
+    settings_text = page.locator(".settings-panel").text_content() or ""
+    assert "/Users/" not in settings_text and ".sqlite" not in settings_text, settings_text
     with page.expect_response(lambda response: "/api/synonyms" in response.url and response.ok):
         page.get_by_role("button", name="查看中文同义词表").click()
-    expect(page.locator(".synonym-list div").first).to_be_visible()
+    expect(page.locator(".synonym-status")).to_contain_text(re.compile(r"已载入|未找到"))
     checks.append("settings and synonym table")
 
     page.set_viewport_size({"width": 390, "height": 820})
-    page.screenshot(path=str(OUTPUT / "logo-mobile-settings.png"), full_page=True)
+    page.screenshot(path=str(OUTPUT / "desktop-narrow-settings.png"), full_page=True)
     body_width = page.evaluate("document.documentElement.scrollWidth")
     viewport_width = page.evaluate("window.innerWidth")
     assert body_width <= viewport_width + 4, (body_width, viewport_width)
-    checks.append("mobile no page overflow")
+    checks.append("desktop narrow window no page overflow")
 
     if console_errors:
         raise AssertionError("browser console errors: " + " | ".join(console_errors))
     return checks
+
+
+def check_mobile_gate(browser: Browser) -> list[str]:
+    context = browser.new_context(
+        viewport={"width": 390, "height": 820},
+        is_mobile=True,
+        has_touch=True,
+        user_agent=(
+            "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) "
+            "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1"
+        ),
+    )
+    page = context.new_page()
+    try:
+        page.goto(APP_URL, wait_until="networkidle")
+        expect(page.get_by_text("建议使用电脑端打开")).to_be_visible(timeout=15000)
+        expect(page.get_by_text("Mac 或 Windows")).to_be_visible()
+        page.screenshot(path=str(OUTPUT / "mobile-desktop-recommendation.png"), full_page=True)
+        body_width = page.evaluate("document.documentElement.scrollWidth")
+        viewport_width = page.evaluate("window.innerWidth")
+        assert body_width <= viewport_width + 4, (body_width, viewport_width)
+        return ["mobile device shows desktop recommendation"]
+    finally:
+        context.close()
 
 
 def main() -> None:
@@ -327,6 +370,7 @@ def main() -> None:
         page = browser.new_page(viewport={"width": 1440, "height": 960}, accept_downloads=True)
         try:
             checks = run(page)
+            checks.extend(check_mobile_gate(browser))
         finally:
             browser.close()
     print("Playwright smoke passed:")

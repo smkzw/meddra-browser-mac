@@ -46,7 +46,7 @@ if %ERRORLEVEL% neq 0 (
 )
 
 set PYTHONPATH=%CD%\backend
-start "" "%CD%\index.html"
+start "" /max "%CD%\index.html"
 
 echo MedDRA Browser is running at http://%HOST%:%PORT%/
 echo Keep this window open while using the browser. Press Ctrl+C to stop.

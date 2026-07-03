@@ -80,6 +80,22 @@ for key in sorted(seen):
 
 (vendor / ".python-version").write_text(f"{sys.version_info.major}.{sys.version_info.minor}\n", encoding="utf-8")
 (vendor / ".python-arch").write_text(f"{platform.machine()}\n", encoding="utf-8")
+for record in vendor.glob("*.dist-info/RECORD"):
+    try:
+        lines = record.read_text(encoding="utf-8").splitlines()
+    except UnicodeDecodeError:
+        continue
+    clean = [
+        line
+        for line in lines
+        if "/Users/" not in line
+        and "\\Users\\" not in line
+        and ".pyc" not in line
+        and "Caches/com.apple.python" not in line
+    ]
+    record.write_text("\n".join(clean) + ("\n" if clean else ""), encoding="utf-8")
+for direct_url in vendor.glob("*.dist-info/direct_url.json"):
+    direct_url.unlink()
 print(f"Vendored {len(seen)} Python distributions into {vendor}")
 PY
 
@@ -109,9 +125,9 @@ cat > "${CONTENTS_DIR}/Info.plist" <<'PLIST'
   <key>CFBundlePackageType</key>
   <string>APPL</string>
   <key>CFBundleShortVersionString</key>
-  <string>0.1.3</string>
+  <string>0.1.4</string>
   <key>CFBundleVersion</key>
-  <string>4</string>
+  <string>5</string>
   <key>LSMinimumSystemVersion</key>
   <string>12.0</string>
   <key>NSHighResolutionCapable</key>
@@ -208,8 +224,6 @@ if [ -z "${MEDDRA_SOURCE_ROOT:-}" ]; then
     export MEDDRA_SOURCE_ROOT="${DICT_DIR}"
   elif [ -d "${APP_ROOT}/dictionaries" ] && find "${APP_ROOT}/dictionaries" -name soc.asc -print -quit | grep -q .; then
     export MEDDRA_SOURCE_ROOT="${APP_ROOT}/dictionaries"
-  elif [ -d "${HOME}/Documents/指导原则及临床试验规范合集/MedDRA" ]; then
-    export MEDDRA_SOURCE_ROOT="${HOME}/Documents/指导原则及临床试验规范合集/MedDRA"
   elif [ -d "${HOME}/Documents/MedDRA" ]; then
     export MEDDRA_SOURCE_ROOT="${HOME}/Documents/MedDRA"
   fi
@@ -242,10 +256,44 @@ if [ "${MEDDRA_BROWSER_OPEN:-1}" = "0" ]; then
   exit 0
 fi
 
+maximize_browser_window() {
+  local app_name="$1"
+  (
+    sleep 1.2
+    osascript <<OSA
+tell application "System Events"
+  if exists process "${app_name}" then
+    tell process "${app_name}"
+      set frontmost to true
+      repeat 20 times
+        if (count of windows) > 0 then exit repeat
+        delay 0.2
+      end repeat
+      if (count of windows) > 0 then
+        try
+          set zoomed of window 1 to true
+        on error
+          try
+            tell application "Finder" to set desktopBounds to bounds of window of desktop
+            set {leftEdge, topEdge, rightEdge, bottomEdge} to desktopBounds
+            set position of window 1 to {leftEdge + 20, topEdge + 40}
+            set size of window 1 to {(rightEdge - leftEdge) - 40, (bottomEdge - topEdge) - 80}
+          end try
+        end try
+      end if
+    end tell
+  end if
+end tell
+OSA
+  ) >/dev/null 2>&1 &!
+}
+
 if [ -d "/Applications/Microsoft Edge.app" ]; then
-  open -na "Microsoft Edge" --args --app="${URL}"
+  open -na "Microsoft Edge" --args --start-maximized --app="${URL}"
+  maximize_browser_window "Microsoft Edge"
 elif [ -d "/Applications/Google Chrome.app" ]; then
-  open -na "Google Chrome" --args --app="${URL}"
+  open -na "Google Chrome" --args --start-maximized --app="${URL}"
+  maximize_browser_window "Google Chrome"
 else
   open "${URL}"
 fi

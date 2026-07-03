@@ -40,6 +40,16 @@ button { border: 0; cursor: pointer; }
 }
 .brand h1 { margin: 0; font-size: 18px; line-height: 1.2; }
 .brand span { color: #8a968f; font-size: 11px; }
+.window-tip {
+  justify-self: center;
+  padding: 5px 9px;
+  border: 1px solid #d8e4dd;
+  border-radius: 999px;
+  color: #52645d;
+  background: #f3f7f4;
+  font-size: 12px;
+  white-space: nowrap;
+}
 .header-actions { display: flex; align-items: center; gap: 10px; }
 .version-select {
   min-height: 34px;
@@ -587,6 +597,12 @@ button:disabled { opacity: 0.45; cursor: not-allowed; }
   white-space: nowrap;
 }
 .synonym-list span { color: #66756f; }
+.synonym-status {
+  margin: -6px 0 0;
+  color: #60716a;
+  font-size: 13px;
+  line-height: 1.5;
+}
 
 .detail-actions {
   display: flex;
@@ -667,15 +683,6 @@ button:disabled { opacity: 0.45; cursor: not-allowed; }
   border-radius: 7px;
   background: #f6f8f7;
   text-align: left;
-}
-.relationship-tree-node::before {
-  content: "";
-  position: absolute;
-  left: calc(12px + var(--indent));
-  top: -6px;
-  bottom: -6px;
-  width: 1px;
-  background: #cfdbd4;
 }
 .relationship-tree-node:hover {
   background: #eef5f1;
@@ -976,6 +983,40 @@ button:disabled { opacity: 0.45; cursor: not-allowed; }
   box-shadow: 0 10px 24px rgba(26, 61, 52, 0.24);
 }
 
+.mobile-gate {
+  min-height: 100%;
+  display: grid;
+  align-content: center;
+  justify-items: center;
+  gap: 12px;
+  padding: 32px 22px;
+  color: #17201b;
+  background: #f4f6f4;
+  text-align: center;
+}
+.mobile-gate img {
+  width: 72px;
+  height: 72px;
+  border-radius: 16px;
+  box-shadow: 0 8px 20px rgba(23, 73, 62, 0.14);
+}
+.mobile-gate h1 {
+  margin: 8px 0 0;
+  font-size: 24px;
+  line-height: 1.25;
+}
+.mobile-gate p {
+  max-width: 420px;
+  margin: 0;
+  color: #4f5f58;
+  line-height: 1.7;
+}
+.mobile-gate span {
+  color: #718079;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
 @media (max-width: 1100px) {
   .app-shell { min-width: 0; grid-template-rows: auto 1fr; }
   .app-header {
@@ -986,6 +1027,9 @@ button:disabled { opacity: 0.45; cursor: not-allowed; }
   }
   .brand {
     min-width: 0;
+  }
+  .window-tip {
+    order: 3;
   }
   .header-actions { width: 100%; flex-wrap: wrap; }
   .workspace {

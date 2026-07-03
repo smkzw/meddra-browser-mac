@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 
@@ -16,11 +17,13 @@ class ApiManualCoverageTests(unittest.TestCase):
     def test_status_and_version_discovery(self) -> None:
         status = self.client.get("/api/status", params={"version": self.version}).json()
         self.assertEqual(status["version"], self.version)
-        self.assertTrue(status["db_path"].endswith("meddra_29_0.sqlite"))
+        self.assertNotIn("db_path", status)
+        self.assertNotIn("source_directories", status)
         self.assertIn("available_versions", status)
 
         releases = self.client.get("/api/releases").json()["releases"]
         self.assertTrue(any(row["version"] == self.version and row["complete"] for row in releases))
+        self.assertFalse(any("english_dir" in row or "chinese_dir" in row for row in releases))
         self.assertIn("PT", status["search_levels"])
         self.assertIn("SMQ", status["search_levels"])
 
@@ -148,15 +151,23 @@ class ApiManualCoverageTests(unittest.TestCase):
     def test_synonym_list_endpoint(self) -> None:
         synonyms = self.client.get("/api/synonyms", params={"version": self.version, "lang": "en", "limit": 20}).json()
         self.assertEqual(synonyms["lang"], "en")
-        self.assertGreater(synonyms["count"], 0)
+        self.assertGreaterEqual(synonyms["count"], 0)
+        self.assertIn("results", synonyms)
         self.assertLessEqual(len(synonyms["results"]), 20)
 
     def test_source_roots_endpoint_rejects_missing_path(self) -> None:
         roots = self.client.get("/api/source-roots").json()
         self.assertIn("roots", roots)
+        self.assertFalse(any("path" in row for row in roots["roots"]))
 
         bad = self.client.post("/api/source-roots", json={"path": "/definitely/not/a/meddra/source"})
         self.assertEqual(bad.status_code, 400)
+
+    def test_source_root_picker_cancel_returns_json(self) -> None:
+        with patch("app.main.pick_dictionary_directory", return_value=None):
+            result = self.client.post("/api/source-roots/pick")
+        self.assertEqual(result.status_code, 200)
+        self.assertEqual(result.json()["status"], "cancelled")
 
 
 if __name__ == "__main__":

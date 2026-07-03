@@ -17,6 +17,7 @@ from typing import Any, Iterable
 
 LEVELS = ["SOC", "HLGT", "HLT", "PT", "LLT"]
 ALL_SEARCH_LEVELS = [*LEVELS, "SMQ"]
+INDEX_SIGNATURE_VERSION = "0.1.4-source-signature-v1"
 REQUIRED_ASC_FILES = {
     "soc.asc",
     "hlgt.asc",
@@ -93,8 +94,6 @@ class ReleaseInfo:
             "usable": self.usable,
             "available_languages": list(self.available_languages),
             "missing_languages": list(self.missing_languages),
-            "english_dir": str(self.english_dir) if self.english_dir else "",
-            "chinese_dir": str(self.chinese_dir) if self.chinese_dir else "",
         }
 
 
@@ -111,10 +110,10 @@ class SourceConfig:
 
 
 def default_source_config(version: str | None = None, root: Path | None = None) -> SourceConfig:
-    med_root = root or default_med_root()
-    releases = discover_releases(med_root)
+    med_root = root.expanduser() if root else default_med_root()
+    releases = discover_releases(med_root if root else None)
     if not releases:
-        raise RuntimeError(f"未在 {med_root} 发现可用的MedDRA ASCII词典目录")
+        raise RuntimeError("未发现可用的MedDRA ASCII词典目录，请在设置中加入词典来源")
     selected = select_release(releases, version)
     source_root = selected.english_dir or selected.chinese_dir or med_root
     db_name = f"meddra_{version_slug(selected.version)}.sqlite"
@@ -127,8 +126,8 @@ def default_source_config(version: str | None = None, root: Path | None = None) 
         version=selected.version,
         english_dir=selected.english_dir,
         chinese_dir=selected.chinese_dir,
-        synonym_english=default_synonym_root(med_root) / "meddra_synonym_english.asc",
-        synonym_chinese=default_synonym_root(med_root) / "meddra_synonym_chinese.asc",
+        synonym_english=default_synonym_root(source_root, selected) / "meddra_synonym_english.asc",
+        synonym_chinese=default_synonym_root(source_root, selected) / "meddra_synonym_chinese.asc",
         db_path=project_data_dir() / db_name,
         available_versions=tuple(releases),
     )
@@ -140,13 +139,14 @@ def default_med_root() -> Path:
         return Path(env_root).expanduser()
     project_root = Path(__file__).resolve().parents[2]
     portable_root = project_root / "dictionaries"
-    if contains_meddra_ascii(portable_root):
-        return portable_root
-    if contains_meddra_ascii(project_root.parent):
-        return project_root.parent
+    app_support_root = Path.home() / "Library" / "Application Support" / "MedDRA Browser Mac" / "dictionaries"
+    documents_root = Path.home() / "Documents" / "MedDRA"
+    for candidate in [portable_root, app_support_root, documents_root]:
+        if contains_meddra_ascii(candidate):
+            return candidate
     if portable_root.exists():
         return portable_root
-    return project_root.parent
+    return app_support_root
 
 
 def contains_meddra_ascii(root: Path) -> bool:
@@ -159,20 +159,45 @@ def contains_meddra_ascii(root: Path) -> bool:
     return True
 
 
-def default_synonym_root(med_root: Path) -> Path:
+def has_synonym_files(root: Path) -> bool:
+    return (root / "meddra_synonym_english.asc").exists() or (root / "meddra_synonym_chinese.asc").exists()
+
+
+def synonym_candidates(base: Path) -> Iterable[Path]:
+    yield base
+    yield base / "MDB4"
+    yield base / "MDB41_D241_B123"
+    try:
+        for child in base.iterdir():
+            if child.is_dir() and child.name.upper().startswith("MDB"):
+                yield child
+    except (OSError, PermissionError):
+        return
+
+
+def default_synonym_root(med_root: Path, release: ReleaseInfo | None = None) -> Path:
     env_root = os.environ.get("MEDDRA_SYNONYM_ROOT")
     if env_root:
         return Path(env_root).expanduser()
     project_root = Path(__file__).resolve().parents[2]
-    candidates = [
-        project_root / "dictionaries" / "MDB41_D241_B123",
-        med_root / "MDB41_D241_B123",
-        med_root.parent / "MDB41_D241_B123",
-    ]
+    bases: list[Path] = []
+    for item in [release.english_dir if release else None, release.chinese_dir if release else None, med_root]:
+        if item is None:
+            continue
+        for base in [item, item.parent, item.parent.parent]:
+            if base not in bases:
+                bases.append(base)
+    bases.extend([project_root / "dictionaries", default_med_root()])
+
+    candidates: list[Path] = []
+    for base in bases:
+        for candidate in synonym_candidates(base):
+            if candidate not in candidates:
+                candidates.append(candidate)
     for candidate in candidates:
-        if candidate.exists():
+        if has_synonym_files(candidate):
             return candidate
-    return candidates[-1]
+    return candidates[0] if candidates else med_root
 
 
 def project_data_dir() -> Path:
@@ -218,7 +243,9 @@ def configured_source_roots(root: Path | None = None) -> list[Path]:
 def add_source_root(path: str) -> Path:
     candidate = Path(path).expanduser()
     if not candidate.exists() or not candidate.is_dir():
-        raise RuntimeError(f"目录不存在或不可读取: {candidate}")
+        raise RuntimeError("目录不存在或不可读取")
+    if not discover_releases(candidate):
+        raise RuntimeError("未在所选文件夹或其子文件夹中发现可用的MedDRA ASCII词典目录")
     roots = load_source_roots()
     if candidate not in roots and candidate != default_med_root():
         roots.append(candidate)
@@ -232,11 +259,12 @@ def add_source_root(path: str) -> Path:
 
 def source_roots_status() -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
-    for root in configured_source_roots():
+    for index, root in enumerate(configured_source_roots(), start=1):
         releases = discover_releases(root)
         rows.append(
             {
-                "path": str(root),
+                "id": f"source-{index}",
+                "label": f"词典来源 {index}",
                 "exists": root.exists(),
                 "release_count": len(releases),
                 "releases": [release.as_dict() for release in releases],
@@ -425,10 +453,11 @@ class MeddraIndexer:
         self.config = config or default_source_config()
 
     def ensure_index(self, *, force: bool = False) -> None:
-        if force and self.config.db_path.exists():
-            self.config.db_path.unlink()
         if self.config.db_path.exists():
-            return
+            if force or not self._index_is_current():
+                self._delete_index()
+            else:
+                return
         language_dirs = self._language_dirs()
         if not language_dirs:
             raise RuntimeError("未配置可用的英文或中文MedDRA ASCII目录")
@@ -441,7 +470,56 @@ class MeddraIndexer:
             self._merge_terms(con)
             self._load_synonyms(con)
             self._build_fts(con)
+            self._write_metadata(con)
             con.commit()
+
+    def _source_signature(self) -> str:
+        parts = [INDEX_SIGNATURE_VERSION, f"version:{self.config.version}"]
+        for lang, base in self._language_dirs():
+            parts.append(f"lang:{lang}:{base.resolve()}")
+            for file_name in sorted(REQUIRED_ASC_FILES):
+                path = base / file_name
+                try:
+                    stat = path.stat()
+                except OSError:
+                    parts.append(f"{lang}:{file_name}:missing")
+                    continue
+                parts.append(f"{lang}:{file_name}:{stat.st_size}:{stat.st_mtime_ns}")
+        for lang, path in [("en", self.config.synonym_english), ("zh", self.config.synonym_chinese)]:
+            try:
+                stat = path.stat()
+            except OSError:
+                parts.append(f"synonym:{lang}:missing")
+                continue
+            parts.append(f"synonym:{lang}:{path.resolve()}:{stat.st_size}:{stat.st_mtime_ns}")
+        return sha1("\n".join(parts).encode("utf-8")).hexdigest()
+
+    def _index_is_current(self) -> bool:
+        try:
+            with sqlite3.connect(self.config.db_path) as con:
+                row = con.execute(
+                    "select value from index_metadata where key='source_signature'"
+                ).fetchone()
+        except sqlite3.DatabaseError:
+            return False
+        return bool(row and row[0] == self._source_signature())
+
+    def _write_metadata(self, con: sqlite3.Connection) -> None:
+        con.execute(
+            "insert or replace into index_metadata values (?, ?)",
+            ("source_signature", self._source_signature()),
+        )
+
+    def _delete_index(self) -> None:
+        for path in [
+            self.config.db_path,
+            self.config.db_path.with_name(f"{self.config.db_path.name}-wal"),
+            self.config.db_path.with_name(f"{self.config.db_path.name}-shm"),
+        ]:
+            try:
+                path.unlink()
+            except FileNotFoundError:
+                continue
 
     def _language_dirs(self) -> list[tuple[str, Path]]:
         rows: list[tuple[str, Path]] = []
@@ -466,6 +544,7 @@ class MeddraIndexer:
             drop table if exists synonyms;
             drop table if exists term_soc;
             drop table if exists soc_order;
+            drop table if exists index_metadata;
             drop table if exists terms_fts;
 
             create table source_counts(
@@ -584,6 +663,11 @@ class MeddraIndexer:
                 soc_code text not null,
                 sort_order integer not null,
                 primary key(lang, soc_code)
+            );
+
+            create table index_metadata(
+                key text primary key,
+                value text not null
             );
             """
         )
@@ -882,11 +966,6 @@ class MeddraStore:
                 "counts": [dict(row) for row in counts],
                 "term_counts": [dict(row) for row in term_counts],
                 "smq_count": smq_count,
-                "db_path": str(self.config.db_path),
-                "source_directories": {
-                    "en": str(self.config.english_dir) if self.config.english_dir else "",
-                    "zh": str(self.config.chinese_dir) if self.config.chinese_dir else "",
-                },
             }
 
     def search(

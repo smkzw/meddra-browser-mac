@@ -122,7 +122,7 @@ export default async function runMeddraSmoke(page) {
   await ensureVisible("英文显示模式", page.locator(".segmented button.active", { hasText: "英文" }));
   await page.getByRole("button", { name: "双语" }).click();
 
-  const searchInput = page.getByPlaceholder("输入术语、中文片段、英文拼写或代码");
+  const searchInput = page.getByPlaceholder("可输入AE/MH名称进行模糊查询或输入代码进行精确查询");
   await searchInput.fill("rhabdomyolisys");
   await page.locator(".center-pane .query-bar button.primary").click();
   await ensureVisible("模糊查询分组", page.getByText("模糊候选").first());
@@ -196,6 +196,9 @@ export default async function runMeddraSmoke(page) {
   await page.screenshot({ path: "output/playwright/final-narrow-search-results.png", fullPage: true });
 
   await page.getByRole("button", { name: "高级搜索" }).click();
+  const advancedInputs = page.locator('input[placeholder="可输入AE/MH名称、中文/英文片段或代码"]');
+  await advancedInputs.nth(0).fill("renal");
+  await advancedInputs.nth(1).fill("failure");
   await page.locator(".advanced-grid button.primary").click();
   await ensureVisible("高级搜索结果", page.locator(".result-list .result").first());
   await ensureNoResultTextOverlap("高级搜索结果无文字碰撞");
@@ -235,16 +238,16 @@ export default async function runMeddraSmoke(page) {
   const synonymResponse = page.waitForResponse((response) => response.url().includes("/api/synonyms") && response.ok());
   await page.getByRole("button", { name: "查看中文同义词表" }).click();
   await synonymResponse;
-  await ensureVisible("同义词表预览", page.locator(".synonym-list div").first());
+  await ensureVisible("同义词表状态", page.locator(".synonym-status"));
 
   await page.setViewportSize({ width: 390, height: 820 });
-  await page.screenshot({ path: "output/playwright/mobile-settings.png", fullPage: true });
+  await page.screenshot({ path: "output/playwright/desktop-narrow-settings.png", fullPage: true });
   const bodyWidth = await page.evaluate(() => document.documentElement.scrollWidth);
   const viewportWidth = await page.evaluate(() => window.innerWidth);
   if (bodyWidth > viewportWidth + 4) {
     throw new Error(`窄屏存在页面级横向溢出: body=${bodyWidth}, viewport=${viewportWidth}`);
   }
-  checks.push("窄屏无页面级横向溢出");
+  checks.push("桌面窄窗口无页面级横向溢出");
 
   if (consoleErrors.length) {
     throw new Error(`浏览器console错误: ${consoleErrors.join(" | ")}`);

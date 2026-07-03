@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from functools import lru_cache
 from pathlib import Path
+import subprocess
+import sys
 from typing import Any, Optional
 
 from fastapi import FastAPI, HTTPException, Query, Request, Response
@@ -24,7 +26,7 @@ from .meddra_data import (
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 FRONTEND_DIST = PROJECT_ROOT / "frontend" / "dist"
 
-app = FastAPI(title="MedDRA Browser Mac", version="0.1.3")
+app = FastAPI(title="MedDRA Browser Mac", version="0.1.4")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
@@ -78,6 +80,38 @@ class SourceRootRequest(BaseModel):
     path: str
 
 
+def pick_dictionary_directory() -> Path | None:
+    if sys.platform == "darwin":
+        script = 'POSIX path of (choose folder with prompt "请选择MedDRA ASCII词典文件夹或其上级文件夹")'
+        command = ["osascript", "-e", script]
+    elif sys.platform.startswith("win"):
+        ps_script = (
+            "Add-Type -AssemblyName System.Windows.Forms; "
+            "$dialog = New-Object System.Windows.Forms.FolderBrowserDialog; "
+            "$dialog.Description = '请选择MedDRA ASCII词典文件夹或其上级文件夹'; "
+            "$dialog.ShowNewFolderButton = $false; "
+            "if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { "
+            "  [Console]::OutputEncoding = [System.Text.Encoding]::UTF8; "
+            "  Write-Output $dialog.SelectedPath "
+            "}"
+        )
+        command = ["powershell", "-NoProfile", "-STA", "-Command", ps_script]
+    else:
+        raise RuntimeError("当前系统不支持本地文件夹选择器，请使用手动路径导入")
+
+    try:
+        result = subprocess.run(command, capture_output=True, text=True, timeout=300, check=False)
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise RuntimeError("无法打开本地文件夹选择器") from exc
+
+    selected = result.stdout.strip()
+    if selected:
+        return Path(selected).expanduser()
+    if result.returncode == 0 or "cancel" in result.stderr.lower():
+        return None
+    raise RuntimeError("本地文件夹选择器已关闭或不可用")
+
+
 @app.on_event("startup")
 def startup() -> None:
     try:
@@ -118,7 +152,29 @@ def api_add_source_root(payload: SourceRootRequest) -> dict[str, Any]:
     releases = discover_releases()
     return {
         "status": "added",
-        "path": str(added),
+        "label": added.name or "已选择来源",
+        "releases": [row.as_dict() for row in releases],
+        "roots": source_roots_status(),
+    }
+
+
+@app.post("/api/source-roots/pick")
+def api_pick_source_root() -> dict[str, Any]:
+    try:
+        selected = pick_dictionary_directory()
+    except RuntimeError as exc:
+        raise HTTPException(status_code=501, detail=str(exc)) from exc
+    if selected is None:
+        return {"status": "cancelled", "roots": source_roots_status(), "releases": [row.as_dict() for row in discover_releases()]}
+    try:
+        added = add_source_root(str(selected))
+    except RuntimeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    store.cache_clear()
+    releases = discover_releases()
+    return {
+        "status": "added",
+        "label": added.name or "已选择来源",
         "releases": [row.as_dict() for row in releases],
         "roots": source_roots_status(),
     }

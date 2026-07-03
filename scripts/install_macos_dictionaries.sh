@@ -1,7 +1,7 @@
 #!/bin/zsh
 set -eu
 
-DEFAULT_SOURCE="${HOME}/Documents/指导原则及临床试验规范合集/MedDRA"
+DEFAULT_SOURCE="${HOME}/Documents/MedDRA"
 SOURCE_ROOT="${1:-${MEDDRA_SOURCE_ROOT:-${DEFAULT_SOURCE}}}"
 DEST_ROOT="${HOME}/Library/Application Support/MedDRA Browser Mac/dictionaries"
 

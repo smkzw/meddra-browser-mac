@@ -123,8 +123,6 @@ interface Status {
   counts: Array<{ lang: string; file_name: string; row_count: number }>;
   term_counts: Array<{ level: string; n: number }>;
   smq_count: number;
-  db_path: string;
-  source_directories: Record<string, string>;
 }
 
 interface ReleaseInfo {
@@ -133,12 +131,11 @@ interface ReleaseInfo {
   usable?: boolean;
   available_languages?: string[];
   missing_languages: string[];
-  english_dir: string;
-  chinese_dir: string;
 }
 
 interface SourceRoot {
-  path: string;
+  id: string;
+  label: string;
   exists: boolean;
   release_count: number;
   releases: ReleaseInfo[];
@@ -157,6 +154,8 @@ interface PaneWidths {
 }
 
 const API = "/api";
+const SEARCH_PLACEHOLDER = "可输入AE/MH名称进行模糊查询或输入代码进行精确查询";
+const ADVANCED_PLACEHOLDER = "可输入AE/MH名称、中文/英文片段或代码";
 const DEFAULT_PANES: PaneWidths = { left: 320, right: 340 };
 const MIN_LEFT_PANE_WIDTH = 240;
 const MAX_LEFT_PANE_WIDTH = 520;
@@ -180,6 +179,15 @@ const MODULES: Array<{ key: ModuleKey; label: string; icon: JSX.Element }> = [
   { key: "history", label: "历史记录", icon: <History size={16} /> },
   { key: "settings", label: "设置", icon: <Settings size={16} /> }
 ];
+
+function detectMobileWorkspace() {
+  if (typeof window === "undefined") return false;
+  const userAgent = window.navigator.userAgent || "";
+  const touchDevice = window.navigator.maxTouchPoints > 1 || window.matchMedia("(pointer: coarse)").matches;
+  const mobileUserAgent = /Android|iPhone|iPad|iPod|Mobile/i.test(userAgent);
+  const ipadDesktopMode = touchDevice && /Macintosh/i.test(userAgent);
+  return (mobileUserAgent || ipadDesktopMode) && window.innerWidth <= 1180;
+}
 
 function displayName(item: { en_name?: string; zh_name?: string }, mode: Mode) {
   if (mode === "en") return item.en_name || item.zh_name || "";
@@ -212,6 +220,37 @@ function apiPath(path: string, version?: string) {
   if (!version) return `${API}${path}`;
   const separator = path.includes("?") ? "&" : "?";
   return `${API}${path}${separator}version=${encodeURIComponent(version)}`;
+}
+
+function apiErrorMessage(data: unknown, fallback: string) {
+  if (data && typeof data === "object") {
+    const row = data as Record<string, unknown>;
+    const detail = row.detail || row.error || row.message;
+    if (typeof detail === "string" && detail.trim()) return detail;
+  }
+  return fallback;
+}
+
+async function readJsonResponse(res: Response) {
+  const text = await res.text();
+  if (!text.trim()) return {};
+  try {
+    return JSON.parse(text);
+  } catch {
+    if (!res.ok) {
+      throw new Error(res.status >= 500 ? "本地服务返回内部错误，请检查词典目录或稍后重试" : text.slice(0, 160));
+    }
+    throw new Error("本地服务返回了无法解析的数据");
+  }
+}
+
+async function fetchJson<T = any>(input: RequestInfo | URL, init?: RequestInit, fallback = "请求失败"): Promise<T> {
+  const res = await fetch(input, init);
+  const data = await readJsonResponse(res);
+  if (!res.ok) {
+    throw new Error(apiErrorMessage(data, fallback));
+  }
+  return data as T;
 }
 
 function isCodeQuery(text: string) {
@@ -252,7 +291,19 @@ function samePaneWidths(a: PaneWidths, b: PaneWidths) {
   return a.left === b.left && a.right === b.right;
 }
 
+function MobileWorkspaceNotice() {
+  return (
+    <main className="mobile-gate">
+      <img src="/brand/app-icon-256.png" alt="" aria-hidden="true" />
+      <h1>建议使用电脑端打开</h1>
+      <p>MedDRA 编码查询需要同时查看层级树、详情关系、Research Bin 和导出结果。手机或小尺寸平板会影响医学编码判断，请在 Mac 或 Windows 的桌面浏览器中使用。</p>
+      <span>本地词典数据不会上传；请在电脑端启动同一套 MedDRA Browser。</span>
+    </main>
+  );
+}
+
 export default function App() {
+  const [mobileWorkspace, setMobileWorkspace] = useState(() => detectMobileWorkspace());
   const [status, setStatus] = useState<Status | null>(null);
   const [version, setVersion] = useState("");
   const [mode, setMode] = useState<Mode>("both");
@@ -261,7 +312,7 @@ export default function App() {
   const [socRoots, setSocRoots] = useState<TreeNode[]>([]);
   const [smqRoots, setSmqRoots] = useState<TreeNode[]>([]);
   const [expanded, setExpanded] = useState<Record<string, TreeNode[]>>({});
-  const [query, setQuery] = useState("横纹肌");
+  const [query, setQuery] = useState("");
   const [socFilter, setSocFilter] = useState("");
   const [selectedLevels, setSelectedLevels] = useState<SearchLevel[]>(["PT"]);
   const [searchGroups, setSearchGroups] = useState<SearchGroup[]>([]);
@@ -273,13 +324,14 @@ export default function App() {
   const [includeSynonyms, setIncludeSynonyms] = useState(true);
   const [ignoreDiacritics, setIgnoreDiacritics] = useState(true);
   const [includeNonCurrent, setIncludeNonCurrent] = useState(true);
-  const [advA, setAdvA] = useState("renal");
-  const [advB, setAdvB] = useState("failure");
+  const [advA, setAdvA] = useState("");
+  const [advB, setAdvB] = useState("");
   const [advOpA, setAdvOpA] = useState("contains");
   const [advOpB, setAdvOpB] = useState("contains");
   const [advBool, setAdvBool] = useState("AND");
   const [advancedResults, setAdvancedResults] = useState<SearchResult[]>([]);
   const [synonyms, setSynonyms] = useState<SynonymRow[]>([]);
+  const [synonymStatus, setSynonymStatus] = useState("");
   const [sourceRoots, setSourceRoots] = useState<SourceRoot[]>([]);
   const [sourcePath, setSourcePath] = useState("");
   const [importingSource, setImportingSource] = useState(false);
@@ -294,12 +346,19 @@ export default function App() {
   const workspaceRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
-    fetch(apiPath("/status", version))
-      .then(async (res) => {
-        const data = await res.json();
-        if (!res.ok) throw new Error(data.detail || "后端未找到可用的MedDRA词典目录");
-        return data;
-      })
+    const update = () => setMobileWorkspace(detectMobileWorkspace());
+    update();
+    window.addEventListener("resize", update);
+    window.addEventListener("orientationchange", update);
+    return () => {
+      window.removeEventListener("resize", update);
+      window.removeEventListener("orientationchange", update);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (mobileWorkspace) return;
+    fetchJson<Status>(apiPath("/status", version), undefined, "后端未找到可用的MedDRA词典目录")
       .then((data) => {
         setStatus(data);
         if (!version) setVersion(data.version);
@@ -308,21 +367,22 @@ export default function App() {
         setModule("settings");
         setToast((error as Error).message || "后端未启动或索引不可用");
       });
-  }, [version]);
+  }, [version, mobileWorkspace]);
 
   useEffect(() => {
+    if (mobileWorkspace) return;
     refreshSourceRoots();
-  }, []);
+  }, [mobileWorkspace]);
 
   useEffect(() => {
-    if (!version) return;
-    fetch(apiPath(`/tree/soc?mode=${mode}`, version))
-      .then((res) => res.json())
-      .then((data) => setSocRoots(data.nodes || []));
-    fetch(apiPath(`/tree/smq?mode=${mode}`, version))
-      .then((res) => res.json())
-      .then((data) => setSmqRoots(data.nodes || []));
-  }, [mode, version]);
+    if (!version || mobileWorkspace) return;
+    fetchJson<{ nodes: TreeNode[] }>(apiPath(`/tree/soc?mode=${mode}`, version), undefined, "SOC层级加载失败")
+      .then((data) => setSocRoots(data.nodes || []))
+      .catch((error) => flash((error as Error).message));
+    fetchJson<{ nodes: TreeNode[] }>(apiPath(`/tree/smq?mode=${mode}`, version), undefined, "SMQ层级加载失败")
+      .then((data) => setSmqRoots(data.nodes || []))
+      .catch((error) => flash((error as Error).message));
+  }, [mode, version, mobileWorkspace]);
 
   useEffect(() => {
     writeStorage("meddra.bin", bin);
@@ -368,8 +428,11 @@ export default function App() {
     setModule("search");
     try {
       if (isCodeQuery(searchText)) {
-        const res = await fetch(apiPath(`/code/${encodeURIComponent(searchText)}`, version), { signal: controller.signal });
-        const data = await res.json();
+        const data = await fetchJson<{ matches?: Detail[] }>(
+          apiPath(`/code/${encodeURIComponent(searchText)}`, version),
+          { signal: controller.signal },
+          "代码查询失败"
+        );
         const rows = ((data.matches || []) as Detail[])
           .map((row) => detailToResult(row))
           .filter(Boolean) as SearchResult[];
@@ -382,7 +445,7 @@ export default function App() {
         addHistory("代码搜索", searchText);
         return;
       }
-      const res = await fetch(`${API}/search`, {
+      const data = await fetchJson<{ groups?: SearchGroup[] }>(`${API}/search`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -397,14 +460,13 @@ export default function App() {
           limit_per_group: 80
         }),
         signal: controller.signal
-      });
-      const data = await res.json();
+      }, "术语搜索失败");
       setSearchGroups(data.groups || []);
       setHistoryCursor(0);
       addHistory("术语搜索", searchText);
     } catch (error) {
       if ((error as DOMException).name !== "AbortError") {
-        flash("搜索失败");
+        flash((error as Error).message || "搜索失败");
       }
     } finally {
       if (abortRef.current === controller) abortRef.current = null;
@@ -416,7 +478,7 @@ export default function App() {
     setLoading(true);
     setModule("advanced");
     try {
-      const res = await fetch(`${API}/advanced-search`, {
+      const data = await fetchJson<{ results?: SearchResult[] }>(`${API}/advanced-search`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -429,10 +491,11 @@ export default function App() {
             { value: advB, operator: advOpB }
           ]
         })
-      });
-      const data = await res.json();
+      }, "高级搜索失败");
       setAdvancedResults(data.results || []);
       addHistory("高级搜索", `${advA} ${advBool} ${advB}`);
+    } catch (error) {
+      flash((error as Error).message || "高级搜索失败");
     } finally {
       setLoading(false);
     }
@@ -443,23 +506,27 @@ export default function App() {
       await loadSmqDetail(itemCode);
       return;
     }
-    const res = await fetch(apiPath(`/details/${level}/${itemCode}`, version));
-    if (!res.ok) return;
-    const data = await res.json();
-    setDetail(data);
-    setSmqDetail(null);
-    setModule("detail");
-    addHistory("打开详情", `${level} ${itemCode}`);
+    try {
+      const data = await fetchJson<Detail>(apiPath(`/details/${level}/${itemCode}`, version), undefined, "详情加载失败");
+      setDetail(data);
+      setSmqDetail(null);
+      setModule("detail");
+      addHistory("打开详情", `${level} ${itemCode}`);
+    } catch (error) {
+      flash((error as Error).message || "详情加载失败");
+    }
   }
 
   async function loadSmqDetail(smqCode: string) {
-    const res = await fetch(apiPath(`/smq/${smqCode}?mode=${mode}`, version));
-    if (!res.ok) return;
-    const data = await res.json();
-    setSmqDetail(data);
-    setDetail(null);
-    setModule("detail");
-    addHistory("打开SMQ", smqCode);
+    try {
+      const data = await fetchJson<SmqDetail>(apiPath(`/smq/${smqCode}?mode=${mode}`, version), undefined, "SMQ详情加载失败");
+      setSmqDetail(data);
+      setDetail(null);
+      setModule("detail");
+      addHistory("打开SMQ", smqCode);
+    } catch (error) {
+      flash((error as Error).message || "SMQ详情加载失败");
+    }
   }
 
   async function expandTree(node: TreeNode) {
@@ -477,16 +544,31 @@ export default function App() {
       treeTab === "soc"
         ? apiPath(`/tree/soc?level=${node.level}&code=${codeValue}&mode=${mode}`, version)
         : apiPath(`/tree/smq?code=${codeValue}&mode=${mode}`, version);
-    const res = await fetch(url);
-    const data = await res.json();
-    setExpanded((current) => ({ ...current, [key]: data.nodes || [] }));
+    try {
+      const data = await fetchJson<{ nodes?: TreeNode[] }>(url, undefined, "子级加载失败");
+      setExpanded((current) => ({ ...current, [key]: data.nodes || [] }));
+    } catch (error) {
+      flash((error as Error).message || "子级加载失败");
+    }
   }
 
   async function loadSynonyms(lang: "en" | "zh" = mode === "en" ? "en" : "zh") {
-    const res = await fetch(apiPath(`/synonyms?lang=${lang}&limit=120`, version));
-    const data = await res.json();
-    setSynonyms(data.results || []);
-    addHistory("同义词表", lang === "zh" ? "中文" : "英文");
+    try {
+      const data = await fetchJson<{ results?: SynonymRow[] }>(
+        apiPath(`/synonyms?lang=${lang}&limit=120`, version),
+        undefined,
+        "同义词表加载失败"
+      );
+      setSynonyms(data.results || []);
+      setSynonymStatus(
+        data.results?.length
+          ? `已载入${lang === "zh" ? "中文" : "英文"}同义词表预览`
+          : `未找到${lang === "zh" ? "中文" : "英文"}同义词表；如需启用，请在词典来源附近放置 MDB 同义词文件夹，或设置 MEDDRA_SYNONYM_ROOT。`
+      );
+      addHistory("同义词表", lang === "zh" ? "中文" : "英文");
+    } catch (error) {
+      flash((error as Error).message || "同义词表加载失败");
+    }
   }
 
   function addHistory(action: string, text: string) {
@@ -561,33 +643,58 @@ export default function App() {
   }
 
   async function refreshSourceRoots() {
-    const res = await fetch(`${API}/source-roots`);
-    if (!res.ok) return;
-    const data = await res.json();
-    setSourceRoots(data.roots || []);
+    try {
+      const data = await fetchJson<{ roots?: SourceRoot[] }>(`${API}/source-roots`, undefined, "词典来源加载失败");
+      setSourceRoots(data.roots || []);
+    } catch (error) {
+      flash((error as Error).message || "词典来源加载失败");
+    }
   }
 
-  async function addDictionarySource() {
+  function applySourceRootResult(data: { roots?: SourceRoot[]; releases?: ReleaseInfo[] }) {
+    setSourceRoots(data.roots || []);
+    setStatus((current) => current ? { ...current, available_versions: data.releases || current.available_versions } : current);
+  }
+
+  async function pickDictionarySource() {
+    setImportingSource(true);
+    try {
+      const data = await fetchJson<{ status: string; roots?: SourceRoot[]; releases?: ReleaseInfo[] }>(
+        `${API}/source-roots/pick`,
+        { method: "POST" },
+        "无法打开文件夹选择器"
+      );
+      if (data.status === "cancelled") {
+        flash("已取消选择词典来源");
+        return;
+      }
+      applySourceRootResult(data);
+      setSourcePath("");
+      flash("词典来源已加入，可选择版本后重建索引");
+    } catch (error) {
+      flash((error as Error).message || "无法打开文件夹选择器");
+    } finally {
+      setImportingSource(false);
+    }
+  }
+
+  async function addDictionarySourceFromPath() {
     if (!sourcePath.trim()) {
       flash("请先输入词典文件夹路径");
       return;
     }
     setImportingSource(true);
     try {
-      const res = await fetch(`${API}/source-roots`, {
+      const data = await fetchJson<{ roots?: SourceRoot[]; releases?: ReleaseInfo[] }>(`${API}/source-roots`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ path: sourcePath.trim() })
-      });
-      const data = await res.json();
-      if (!res.ok) {
-        flash(data.detail || "导入目录失败");
-        return;
-      }
-      setSourceRoots(data.roots || []);
-      setStatus((current) => current ? { ...current, available_versions: data.releases || current.available_versions } : current);
+      }, "导入目录失败");
+      applySourceRootResult(data);
       setSourcePath("");
       flash("词典来源已加入，可选择版本后重建索引");
+    } catch (error) {
+      flash((error as Error).message || "导入目录失败");
     } finally {
       setImportingSource(false);
     }
@@ -596,15 +703,11 @@ export default function App() {
   async function reindexCurrentVersion() {
     setImportingSource(true);
     try {
-      const res = await fetch(apiPath("/reindex", version), { method: "POST" });
-      const data = await res.json();
-      if (!res.ok) {
-        flash(data.detail || "重建索引失败");
-        return;
-      }
+      const data = await fetchJson<{ version: string }>(apiPath("/reindex", version), { method: "POST" }, "重建索引失败");
       flash(`已重建 MedDRA ${data.version}`);
-      const statusRes = await fetch(apiPath("/status", data.version));
-      if (statusRes.ok) setStatus(await statusRes.json());
+      setStatus(await fetchJson<Status>(apiPath("/status", data.version), undefined, "状态刷新失败"));
+    } catch (error) {
+      flash((error as Error).message || "重建索引失败");
     } finally {
       setImportingSource(false);
     }
@@ -663,6 +766,8 @@ export default function App() {
     window.addEventListener("pointerup", handleUp, { once: true });
   }
 
+  if (mobileWorkspace) return <MobileWorkspaceNotice />;
+
   return (
     <div className="app-shell">
       <header className="app-header">
@@ -673,6 +778,7 @@ export default function App() {
             <span>本地词典浏览 · 中文界面 · MedDRA {status?.version || version || "自动选择"}</span>
           </div>
         </div>
+        <div className="window-tip">建议最大化窗口后使用</div>
         <div className="header-actions">
           <select
             className="version-select"
@@ -700,7 +806,17 @@ export default function App() {
               </button>
             ))}
           </div>
-          <button className="icon-button" title="重置搜索" onClick={() => performSearch("横纹肌")}>
+          <button
+            className="icon-button"
+            title="清空搜索"
+            onClick={() => {
+              setQuery("");
+              setSearchGroups([]);
+              setAdvancedResults([]);
+              setDetail(null);
+              setSmqDetail(null);
+            }}
+          >
             <RotateCcw size={17} />
           </button>
         </div>
@@ -757,7 +873,7 @@ export default function App() {
           {module === "search" && (
             <section className="module">
               <div className="query-bar">
-                <input value={query} onChange={(event) => setQuery(event.target.value)} onKeyDown={(event) => event.key === "Enter" && performSearch()} placeholder="输入术语、中文片段、英文拼写或代码" />
+                <input value={query} onChange={(event) => setQuery(event.target.value)} onKeyDown={(event) => event.key === "Enter" && performSearch()} placeholder={SEARCH_PLACEHOLDER} />
                 <button className="primary" onClick={() => performSearch()} disabled={loading}>
                   <Search size={16} /> 搜索
                 </button>
@@ -807,7 +923,7 @@ export default function App() {
                   <option value="exact">完全等于</option>
                   <option value="ends">结尾为</option>
                 </select>
-                <input value={advA} onChange={(event) => setAdvA(event.target.value)} />
+                <input value={advA} onChange={(event) => setAdvA(event.target.value)} placeholder={ADVANCED_PLACEHOLDER} />
                 <select value={advBool} onChange={(event) => setAdvBool(event.target.value)}>
                   <option value="AND">AND</option>
                   <option value="OR">OR</option>
@@ -819,7 +935,7 @@ export default function App() {
                   <option value="exact">完全等于</option>
                   <option value="ends">结尾为</option>
                 </select>
-                <input value={advB} onChange={(event) => setAdvB(event.target.value)} />
+                <input value={advB} onChange={(event) => setAdvB(event.target.value)} placeholder={ADVANCED_PLACEHOLDER} />
                 <button className="primary" onClick={performAdvancedSearch}>
                   <Search size={16} /> 高级搜索
                 </button>
@@ -894,7 +1010,7 @@ export default function App() {
               <div className="source-import">
                 <header>
                   <h2>词典来源导入</h2>
-                  <p>输入包含 MedDRA ASCII 文件的文件夹路径；可填具体 MedAscii/ascii 目录，也可填其上级版本目录或工作目录。</p>
+                  <p>选择包含 MedDRA ASCII 文件的文件夹；可选具体 MedAscii/ascii 目录，也可选其上级版本目录或工作目录。</p>
                 </header>
                 <div className="required-files">
                   {["soc.asc", "pt.asc", "llt.asc", "mdhier.asc", "smq_list.asc", "smq_content.asc"].map((file) => (
@@ -902,9 +1018,12 @@ export default function App() {
                   ))}
                 </div>
                 <div className="query-bar compact">
-                  <input value={sourcePath} onChange={(event) => setSourcePath(event.target.value)} placeholder="/path/to/MedAscii 或 /path/to/ascii_290" />
-                  <button className="primary" onClick={addDictionarySource} disabled={importingSource}>
+                  <button className="primary" onClick={pickDictionarySource} disabled={importingSource}>
                     <Upload size={16} /> 加入来源
+                  </button>
+                  <input value={sourcePath} onChange={(event) => setSourcePath(event.target.value)} placeholder="也可手动粘贴词典文件夹路径" />
+                  <button onClick={addDictionarySourceFromPath} disabled={importingSource}>
+                    手动加入路径
                   </button>
                   <button onClick={reindexCurrentVersion} disabled={importingSource || !version}>
                     <RotateCcw size={16} /> 重建当前版本
@@ -915,6 +1034,7 @@ export default function App() {
                 <button onClick={() => loadSynonyms("zh")}>查看中文同义词表</button>
                 <button onClick={() => loadSynonyms("en")}>查看英文同义词表</button>
               </div>
+              {synonymStatus && <p className="synonym-status">{synonymStatus}</p>}
               {synonyms.length > 0 && (
                 <div className="synonym-list">
                   {synonyms.map((row) => (
@@ -935,15 +1055,12 @@ export default function App() {
               </div>
               <div className="source-root-list">
                 {sourceRoots.map((root) => (
-                  <div key={root.path}>
-                    <strong>{root.path}</strong>
+                  <div key={root.id || root.label}>
+                    <strong>{root.label || "词典来源"}</strong>
                     <span>{root.exists ? `${root.release_count} 个版本` : "路径不可用"}</span>
                   </div>
                 ))}
               </div>
-              <code className="db-path">EN: {status?.source_directories?.en}</code>
-              <code className="db-path">ZH: {status?.source_directories?.zh}</code>
-              <code className="db-path">{status?.db_path}</code>
             </section>
           )}
         </main>
