@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path
 
 from playwright.sync_api import Page, expect, sync_playwright
@@ -57,6 +58,120 @@ def check_result_layout(page: Page, label: str) -> None:
     )
     if issues:
         raise AssertionError(f"{label}: text overlap or horizontal overflow: {issues}")
+
+
+def expected_center_min(viewport_width: int) -> int:
+    if viewport_width <= 1100:
+        return 0
+    if viewport_width >= 1700:
+        return 900
+    if viewport_width >= 1300:
+        return round(viewport_width * 0.52)
+    return round(viewport_width * 0.5)
+
+
+def inspect_result_density(page: Page, label: str, viewport_width: int) -> None:
+    metrics = page.evaluate(
+        """() => {
+          const center = document.querySelector(".center-pane");
+          const group = document.querySelector(".center-pane .result-group");
+          const row = document.querySelector(".center-pane .result");
+          const main = document.querySelector(".center-pane .result-main");
+          if (!center || !group || !row || !main) return { missing: true };
+          const centerRect = center.getBoundingClientRect();
+          const groupRect = group.getBoundingClientRect();
+          const rowRect = row.getBoundingClientRect();
+          const mainRect = main.getBoundingClientRect();
+          const style = window.getComputedStyle(row);
+          const columns = style.gridTemplateColumns.split(" ").filter(Boolean).length;
+          return {
+            missing: false,
+            viewport: window.innerWidth,
+            bodyWidth: document.documentElement.scrollWidth,
+            centerWidth: centerRect.width,
+            groupWidth: groupRect.width,
+            rowHeight: rowRect.height,
+            rowWidth: rowRect.width,
+            rowScrollWidth: row.scrollWidth,
+            mainWidth: mainRect.width,
+            columns
+          };
+        }"""
+    )
+    if metrics.get("missing"):
+        raise AssertionError(f"{label}: result metrics missing")
+    if metrics["bodyWidth"] > metrics["viewport"] + 4:
+        raise AssertionError(f"{label}: page overflow {metrics}")
+    if metrics["rowScrollWidth"] > metrics["rowWidth"] + 4:
+        raise AssertionError(f"{label}: result row overflow {metrics}")
+    if metrics["groupWidth"] < metrics["centerWidth"] - 36:
+        raise AssertionError(f"{label}: result group does not use center width {metrics}")
+    min_center = expected_center_min(viewport_width)
+    if min_center and metrics["centerWidth"] < min_center - 28:
+        raise AssertionError(f"{label}: center pane below responsive budget {metrics}, expected >= {min_center}")
+    if metrics["centerWidth"] >= 660:
+        if metrics["columns"] < 3:
+            raise AssertionError(f"{label}: wide result row collapsed into stacked layout {metrics}")
+        if metrics["rowHeight"] > 118:
+            raise AssertionError(f"{label}: wide result row too tall/crumpled {metrics}")
+        if metrics["mainWidth"] < min(360, metrics["centerWidth"] * 0.48):
+            raise AssertionError(f"{label}: main result area too narrow {metrics}")
+
+
+def drag_pane(page: Page, side: str, delta: int) -> None:
+    locator = page.locator(f".pane-resizer-{side}")
+    box = locator.bounding_box()
+    if not box:
+        return
+    x = box["x"] + box["width"] / 2
+    y = box["y"] + 120
+    page.mouse.move(x, y)
+    page.mouse.down()
+    page.mouse.move(x + delta, y, steps=10)
+    page.mouse.up()
+    page.wait_for_timeout(120)
+
+
+def ensure_search_results(page: Page) -> None:
+    page.get_by_role("navigation").get_by_role("button", name="搜索", exact=True).click()
+    search = page.get_by_placeholder("输入术语、中文片段、英文拼写或代码")
+    search.fill("横纹肌")
+    page.locator(".center-pane .query-bar button.primary").click()
+    expect(page.locator(".result-group", has_text="包含匹配")).to_be_visible(timeout=15000)
+
+
+def check_responsive_matrix(page: Page) -> list[str]:
+    scenarios: list[str] = []
+    for width in [980, 1180, 1366, 1440, 1600, 1920]:
+        page.set_viewport_size({"width": width, "height": 900})
+        page.evaluate(
+            """() => {
+              localStorage.removeItem("meddra.panes");
+              localStorage.removeItem("meddra.history");
+            }"""
+        )
+        page.reload(wait_until="networkidle")
+        expect(page.get_by_role("navigation").get_by_role("button", name="搜索", exact=True)).to_have_class(
+            re.compile(r"\bactive\b"), timeout=15000
+        )
+        ensure_search_results(page)
+        check_result_layout(page, f"responsive {width} default")
+        inspect_result_density(page, f"responsive {width} default", width)
+        if width > 1100:
+            for label, actions in [
+                ("left-wide", [("left", 260)]),
+                ("right-wide", [("right", -260)]),
+                ("both-attempted-wide", [("left", 260), ("right", -260)]),
+                ("both-narrowed", [("left", -180), ("right", 180)])
+            ]:
+                for side, delta in actions:
+                    drag_pane(page, side, delta)
+                ensure_search_results(page)
+                check_result_layout(page, f"responsive {width} {label}")
+                inspect_result_density(page, f"responsive {width} {label}", width)
+        page.screenshot(path=str(OUTPUT / f"responsive-{width}.png"), full_page=True)
+        scenarios.append(f"responsive matrix {width}px")
+    return scenarios
 
 
 def run(page: Page) -> list[str]:
@@ -154,6 +269,7 @@ def run(page: Page) -> list[str]:
     check_result_layout(page, "narrow center search")
     page.screenshot(path=str(OUTPUT / "logo-narrow-search.png"), full_page=True)
     checks.append("narrow results no overlap")
+    checks.extend(check_responsive_matrix(page))
 
     page.get_by_role("button", name="高级搜索").click()
     page.locator(".advanced-grid button.primary").click()

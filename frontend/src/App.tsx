@@ -157,8 +157,12 @@ interface PaneWidths {
 }
 
 const API = "/api";
-const DEFAULT_PANES: PaneWidths = { left: 380, right: 410 };
-const CENTER_MIN_WIDTH = 360;
+const DEFAULT_PANES: PaneWidths = { left: 320, right: 340 };
+const MIN_LEFT_PANE_WIDTH = 240;
+const MAX_LEFT_PANE_WIDTH = 520;
+const MIN_RIGHT_PANE_WIDTH = 280;
+const MAX_RIGHT_PANE_WIDTH = 560;
+const STACKED_WORKSPACE_WIDTH = 1100;
 const RESIZER_WIDTH_TOTAL = 12;
 const LEVEL_OPTIONS: Array<{ key: SearchLevel; label: string; hint: string }> = [
   { key: "PT", label: "PT", hint: "默认" },
@@ -218,6 +222,36 @@ function clamp(value: number, min: number, max: number) {
   return Math.min(Math.max(value, min), Math.max(min, max));
 }
 
+function desiredCenterWidth(workspaceWidth: number) {
+  if (workspaceWidth <= STACKED_WORKSPACE_WIDTH) return 420;
+  if (workspaceWidth >= 1700) return 900;
+  if (workspaceWidth >= 1300) return Math.round(workspaceWidth * 0.52);
+  return Math.round(workspaceWidth * 0.5);
+}
+
+function normalizePaneWidths(widths: PaneWidths, workspaceWidth: number): PaneWidths {
+  if (!workspaceWidth || workspaceWidth <= STACKED_WORKSPACE_WIDTH) return widths;
+  const centerMin = desiredCenterWidth(workspaceWidth);
+  const sideBudget = Math.max(
+    MIN_LEFT_PANE_WIDTH + MIN_RIGHT_PANE_WIDTH,
+    workspaceWidth - RESIZER_WIDTH_TOTAL - centerMin
+  );
+  let left = clamp(widths.left, MIN_LEFT_PANE_WIDTH, Math.min(MAX_LEFT_PANE_WIDTH, sideBudget - MIN_RIGHT_PANE_WIDTH));
+  let right = clamp(widths.right, MIN_RIGHT_PANE_WIDTH, Math.min(MAX_RIGHT_PANE_WIDTH, sideBudget - left));
+  if (left + right > sideBudget) {
+    const overflow = left + right - sideBudget;
+    right = clamp(right - overflow, MIN_RIGHT_PANE_WIDTH, MAX_RIGHT_PANE_WIDTH);
+  }
+  if (left + right > sideBudget) {
+    left = clamp(sideBudget - right, MIN_LEFT_PANE_WIDTH, MAX_LEFT_PANE_WIDTH);
+  }
+  return { left: Math.round(left), right: Math.round(right) };
+}
+
+function samePaneWidths(a: PaneWidths, b: PaneWidths) {
+  return a.left === b.left && a.right === b.right;
+}
+
 export default function App() {
   const [status, setStatus] = useState<Status | null>(null);
   const [version, setVersion] = useState("");
@@ -251,6 +285,7 @@ export default function App() {
   const [importingSource, setImportingSource] = useState(false);
   const [bin, setBin] = useState<SearchResult[]>(() => readStorage<SearchResult[]>("meddra.bin", []));
   const [paneWidths, setPaneWidths] = useState<PaneWidths>(() => readStorage<PaneWidths>("meddra.panes", DEFAULT_PANES));
+  const [workspaceWidth, setWorkspaceWidth] = useState(0);
   const [historyRows, setHistoryRows] = useState<Array<{ action: string; text: string; at: string }>>(() =>
     readStorage<Array<{ action: string; text: string; at: string }>>("meddra.history", [])
   );
@@ -301,11 +336,27 @@ export default function App() {
     writeStorage("meddra.panes", paneWidths);
   }, [paneWidths]);
 
+  useEffect(() => {
+    const workspace = workspaceRef.current;
+    if (!workspace) return;
+    const observer = new ResizeObserver(([entry]) => {
+      const width = Math.round(entry.contentRect.width);
+      setWorkspaceWidth(width);
+      setPaneWidths((current) => {
+        const normalized = normalizePaneWidths(current, width);
+        return samePaneWidths(current, normalized) ? current : normalized;
+      });
+    });
+    observer.observe(workspace);
+    return () => observer.disconnect();
+  }, []);
+
   const flattenedSearchRows = useMemo(() => searchGroups.flatMap((group) => group.results), [searchGroups]);
   const binKeys = useMemo(() => new Set(bin.map((row) => `${row.level}:${row.code}`)), [bin]);
   const workspaceStyle = {
     "--left-pane-width": `${paneWidths.left}px`,
-    "--right-pane-width": `${paneWidths.right}px`
+    "--right-pane-width": `${paneWidths.right}px`,
+    "--center-pane-min": `${desiredCenterWidth(workspaceWidth)}px`
   } as CSSProperties;
 
   async function performSearch(text = query) {
@@ -586,14 +637,21 @@ export default function App() {
     document.body.classList.add("resizing-panes");
     const handleMove = (moveEvent: PointerEvent) => {
       const delta = moveEvent.clientX - startX;
-      const available = Math.max(0, workspace.width - RESIZER_WIDTH_TOTAL - CENTER_MIN_WIDTH);
+      const sideBudget = Math.max(
+        MIN_LEFT_PANE_WIDTH + MIN_RIGHT_PANE_WIDTH,
+        workspace.width - RESIZER_WIDTH_TOTAL - desiredCenterWidth(workspace.width)
+      );
       setPaneWidths((current) => {
         if (side === "left") {
-          const maxLeft = Math.max(240, Math.min(560, available - current.right));
-          return { ...current, left: clamp(startLeft + delta, 240, maxLeft) };
+          const maxLeft = Math.max(MIN_LEFT_PANE_WIDTH, Math.min(MAX_LEFT_PANE_WIDTH, sideBudget - MIN_RIGHT_PANE_WIDTH));
+          const left = clamp(startLeft + delta, MIN_LEFT_PANE_WIDTH, maxLeft);
+          const right = clamp(current.right, MIN_RIGHT_PANE_WIDTH, Math.min(MAX_RIGHT_PANE_WIDTH, sideBudget - left));
+          return normalizePaneWidths({ left, right }, workspace.width);
         }
-        const maxRight = Math.max(300, Math.min(680, available - current.left));
-        return { ...current, right: clamp(startRight - delta, 300, maxRight) };
+        const maxRight = Math.max(MIN_RIGHT_PANE_WIDTH, Math.min(MAX_RIGHT_PANE_WIDTH, sideBudget - MIN_LEFT_PANE_WIDTH));
+        const right = clamp(startRight - delta, MIN_RIGHT_PANE_WIDTH, maxRight);
+        const left = clamp(current.left, MIN_LEFT_PANE_WIDTH, Math.min(MAX_LEFT_PANE_WIDTH, sideBudget - right));
+        return normalizePaneWidths({ left, right }, workspace.width);
       });
     };
     const handleUp = () => {
