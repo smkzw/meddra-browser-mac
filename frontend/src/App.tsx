@@ -125,6 +125,19 @@ interface Status {
   smq_count: number;
 }
 
+interface IndexStatus {
+  version?: string;
+  state: "pending" | "running" | "ready" | "error";
+  phase?: string;
+  message?: string;
+  percent: number;
+  processed_rows: number;
+  total_rows: number;
+  started_at?: number;
+  updated_at?: number;
+  error?: string;
+}
+
 interface ReleaseInfo {
   version: string;
   complete: boolean;
@@ -261,12 +274,44 @@ function apiErrorMessage(data: unknown, fallback: string) {
     const row = data as Record<string, unknown>;
     const detail = row.detail || row.error || row.message;
     if (typeof detail === "string" && detail.trim()) return detail;
+    if (detail && typeof detail === "object") {
+      const nested = detail as Record<string, unknown>;
+      const nestedMessage = nested.message || nested.detail || nested.error;
+      if (typeof nestedMessage === "string" && nestedMessage.trim()) return nestedMessage;
+    }
   }
   return fallback;
 }
 
 function isMissingDictionaryMessage(message: string) {
   return message.includes("未发现可用的MedDRA") || message.includes("加入词典来源") || message.includes("还没有发现可用词典");
+}
+
+function isIndexWaitingMessage(message: string) {
+  return (
+    message.includes("index_not_ready") ||
+    message.includes("索引仍在准备") ||
+    message.includes("索引正在准备") ||
+    message.includes("等待进度条完成")
+  );
+}
+
+function formatInteger(value?: number) {
+  return Number(value || 0).toLocaleString("zh-CN");
+}
+
+function indexPercent(status: IndexStatus | null) {
+  return clamp(Number(status?.percent || 0), 0, 100);
+}
+
+function indexProgressNotice(status: IndexStatus | null) {
+  if (!status) return "正在检查本地词典索引...";
+  if (status.state === "ready") return `MedDRA ${status.version || ""} 索引已完成。`;
+  if (status.state === "error") return status.error || status.message || "索引失败，请检查词典目录后重试。";
+  const rows = status.total_rows
+    ? `${formatInteger(status.processed_rows)} / ${formatInteger(status.total_rows)} 条处理记录`
+    : "正在统计处理记录";
+  return `${status.message || "正在创建本地索引"} · ${indexPercent(status)}% · ${rows}`;
 }
 
 async function readJsonResponse(res: Response) {
@@ -276,7 +321,7 @@ async function readJsonResponse(res: Response) {
     return JSON.parse(text);
   } catch {
     if (!res.ok) {
-      throw new Error(res.status >= 500 ? "本地服务返回内部错误，请检查词典目录或稍后重试" : text.slice(0, 160));
+      throw new Error(res.status >= 500 ? "本地词典索引正在准备或服务正在启动，请稍后再试" : text.slice(0, 160));
     }
     throw new Error("本地服务返回了无法解析的数据");
   }
@@ -343,6 +388,8 @@ function MobileWorkspaceNotice() {
 export default function App() {
   const [mobileWorkspace, setMobileWorkspace] = useState(() => detectMobileWorkspace());
   const [status, setStatus] = useState<Status | null>(null);
+  const [indexStatus, setIndexStatus] = useState<IndexStatus | null>(null);
+  const [indexRefreshKey, setIndexRefreshKey] = useState(0);
   const [version, setVersion] = useState("");
   const [mode, setMode] = useState<Mode>("both");
   const [module, setModule] = useState<ModuleKey>("search");
@@ -401,30 +448,58 @@ export default function App() {
     let cancelled = false;
     let timer: number | undefined;
     const targetVersion = version;
-    const maxAttempts = targetVersion ? 40 : 1;
+    const maxAttempts = targetVersion ? 160 : 4;
     setStatusLoading(true);
-    setStatusNotice(targetVersion ? `正在载入 MedDRA ${targetVersion}，首次切换可能需要解析索引...` : "正在载入本地 MedDRA 词典...");
+    setStatusNotice(targetVersion ? `正在检查 MedDRA ${targetVersion} 本地索引...` : "正在检查本地 MedDRA 词典...");
 
     const loadStatus = (attempt = 0) => {
-      fetchJson<Status>(apiPath("/status", targetVersion), undefined, "后端未找到可用的MedDRA词典目录")
-        .then((data) => {
+      fetchJson<IndexStatus>(apiPath("/index-status?start=true", targetVersion), undefined, "后端未找到可用的MedDRA词典目录")
+        .then((indexData) => {
           if (cancelled) return;
-          setStatus(data);
-          if (!targetVersion) setVersion(data.version);
-          setStatusLoading(false);
-          setStatusNotice("");
+          setIndexStatus(indexData);
+          if (indexData.state === "error") {
+            setStatusLoading(false);
+            setStatusNotice(indexProgressNotice(indexData));
+            return;
+          }
+          if (indexData.state !== "ready") {
+            setStatusLoading(true);
+            setStatusNotice(indexProgressNotice(indexData));
+            timer = window.setTimeout(() => loadStatus(attempt + 1), 900);
+            return;
+          }
+          fetchJson<Status>(apiPath("/status", targetVersion || indexData.version), undefined, "状态刷新失败")
+            .then((data) => {
+              if (cancelled) return;
+              setStatus(data);
+              if (!targetVersion) setVersion(data.version);
+              setStatusLoading(false);
+              setStatusNotice("");
+            })
+            .catch((error) => {
+              if (cancelled) return;
+              const message = (error as Error).message || "";
+              if (isIndexWaitingMessage(message) && attempt + 1 < maxAttempts) {
+                setStatusNotice("本地词典索引正在收尾，请稍候...");
+                timer = window.setTimeout(() => loadStatus(attempt + 1), 900);
+                return;
+              }
+              setStatusLoading(false);
+              setStatusNotice(message || "状态刷新失败");
+            });
         })
         .catch((error) => {
           if (cancelled) return;
           const message = (error as Error).message || "";
           if (isMissingDictionaryMessage(message)) {
+            setIndexStatus(null);
             setStatusLoading(false);
             setModule("settings");
             setStatusNotice("还没有绑定 MedDRA 词典，请在设置中选择词典文件夹。");
             return;
           }
           if (attempt + 1 < maxAttempts) {
-            setStatusNotice(`正在解析 MedDRA ${targetVersion}，请稍候...`);
+            setStatusNotice(targetVersion ? `正在准备 MedDRA ${targetVersion} 本地索引，请稍候...` : "正在等待本地服务和词典索引...");
             timer = window.setTimeout(() => loadStatus(attempt + 1), 1200);
             return;
           }
@@ -444,7 +519,7 @@ export default function App() {
       cancelled = true;
       if (timer) window.clearTimeout(timer);
     };
-  }, [version, mobileWorkspace]);
+  }, [version, mobileWorkspace, indexRefreshKey]);
 
   useEffect(() => {
     if (mobileWorkspace) return;
@@ -452,14 +527,19 @@ export default function App() {
   }, [mobileWorkspace]);
 
   useEffect(() => {
-    if (!version || mobileWorkspace || status?.version !== version) return;
+    if (!version || mobileWorkspace || status?.version !== version || indexStatus?.state !== "ready") {
+      setSocRoots([]);
+      setSmqRoots([]);
+      setExpanded({});
+      return;
+    }
     fetchJson<{ nodes: TreeNode[] }>(apiPath(`/tree/soc?mode=${mode}`, version), undefined, "SOC层级加载失败")
       .then((data) => setSocRoots(data.nodes || []))
-      .catch((error) => flash((error as Error).message));
+      .catch((error) => handleApiError(error, "SOC层级加载失败"));
     fetchJson<{ nodes: TreeNode[] }>(apiPath(`/tree/smq?mode=${mode}`, version), undefined, "SMQ层级加载失败")
       .then((data) => setSmqRoots(data.nodes || []))
-      .catch((error) => flash((error as Error).message));
-  }, [mode, version, status?.version, mobileWorkspace]);
+      .catch((error) => handleApiError(error, "SMQ层级加载失败"));
+  }, [mode, version, status?.version, indexStatus?.state, mobileWorkspace]);
 
   useEffect(() => {
     writeStorage("meddra.bin", bin);
@@ -491,14 +571,38 @@ export default function App() {
   const flattenedSearchRows = useMemo(() => searchGroups.flatMap((group) => group.results), [searchGroups]);
   const binKeys = useMemo(() => new Set(bin.map((row) => `${row.level}:${row.code}`)), [bin]);
   const sourceReleases = useMemo(() => mergeReleases(sourceRoots.flatMap((root) => root.releases || [])), [sourceRoots]);
-  const versionReady = Boolean(version && status?.version === version);
+  const availableVersions = useMemo(
+    () => (status?.available_versions?.length ? status.available_versions : sourceReleases),
+    [status?.available_versions, sourceReleases]
+  );
+  const versionReady = Boolean(version && status?.version === version && indexStatus?.state === "ready");
   const workspaceStyle = {
     "--left-pane-width": `${paneWidths.left}px`,
     "--right-pane-width": `${paneWidths.right}px`,
     "--center-pane-min": `${desiredCenterWidth(workspaceWidth)}px`
   } as CSSProperties;
 
+  function requireIndexReady(action: string) {
+    if (versionReady) return true;
+    const message = indexStatus?.state === "error"
+      ? indexProgressNotice(indexStatus)
+      : `词典索引仍在准备，请等待上方进度条完成后再${action}。`;
+    setStatusNotice(message);
+    flash(message);
+    return false;
+  }
+
+  function handleApiError(error: unknown, fallback: string) {
+    const message = (error as Error).message || fallback;
+    if (isIndexWaitingMessage(message)) {
+      setStatusNotice("词典索引仍在准备，请等待上方进度条完成后再操作。");
+      return;
+    }
+    flash(message);
+  }
+
   async function performSearch(text = query) {
+    if (!requireIndexReady("搜索")) return;
     abortRef.current?.abort();
     const controller = new AbortController();
     abortRef.current = controller;
@@ -545,7 +649,7 @@ export default function App() {
       addHistory("术语搜索", searchText);
     } catch (error) {
       if ((error as DOMException).name !== "AbortError") {
-        flash((error as Error).message || "搜索失败");
+        handleApiError(error, "搜索失败");
       }
     } finally {
       if (abortRef.current === controller) abortRef.current = null;
@@ -554,6 +658,7 @@ export default function App() {
   }
 
   async function performAdvancedSearch() {
+    if (!requireIndexReady("高级搜索")) return;
     setLoading(true);
     setModule("advanced");
     try {
@@ -574,13 +679,14 @@ export default function App() {
       setAdvancedResults(data.results || []);
       addHistory("高级搜索", `${advA} ${advBool} ${advB}`);
     } catch (error) {
-      flash((error as Error).message || "高级搜索失败");
+      handleApiError(error, "高级搜索失败");
     } finally {
       setLoading(false);
     }
   }
 
   async function loadDetail(level: string, itemCode: string) {
+    if (!requireIndexReady("打开详情")) return;
     if (level === "SMQ") {
       await loadSmqDetail(itemCode);
       return;
@@ -592,11 +698,12 @@ export default function App() {
       setModule("detail");
       addHistory("打开详情", `${level} ${itemCode}`);
     } catch (error) {
-      flash((error as Error).message || "详情加载失败");
+      handleApiError(error, "详情加载失败");
     }
   }
 
   async function loadSmqDetail(smqCode: string) {
+    if (!requireIndexReady("打开SMQ")) return;
     try {
       const data = await fetchJson<SmqDetail>(apiPath(`/smq/${smqCode}?mode=${mode}`, version), undefined, "SMQ详情加载失败");
       setSmqDetail(data);
@@ -604,11 +711,12 @@ export default function App() {
       setModule("detail");
       addHistory("打开SMQ", smqCode);
     } catch (error) {
-      flash((error as Error).message || "SMQ详情加载失败");
+      handleApiError(error, "SMQ详情加载失败");
     }
   }
 
   async function expandTree(node: TreeNode) {
+    if (!requireIndexReady("展开层级")) return;
     const key = `${treeTab}:${node.level}:${node.code || node.smq_code}`;
     if (expanded[key]) {
       setExpanded((current) => {
@@ -627,11 +735,12 @@ export default function App() {
       const data = await fetchJson<{ nodes?: TreeNode[] }>(url, undefined, "子级加载失败");
       setExpanded((current) => ({ ...current, [key]: data.nodes || [] }));
     } catch (error) {
-      flash((error as Error).message || "子级加载失败");
+      handleApiError(error, "子级加载失败");
     }
   }
 
   async function loadSynonyms(lang: "en" | "zh" = mode === "en" ? "en" : "zh") {
+    if (!requireIndexReady("查看同义词表")) return;
     try {
       const data = await fetchJson<{ results?: SynonymRow[] }>(
         apiPath(`/synonyms?lang=${lang}&limit=120`, version),
@@ -646,7 +755,7 @@ export default function App() {
       );
       addHistory("同义词表", lang === "zh" ? "中文" : "英文");
     } catch (error) {
-      flash((error as Error).message || "同义词表加载失败");
+      handleApiError(error, "同义词表加载失败");
     }
   }
 
@@ -733,8 +842,10 @@ export default function App() {
   function applySourceRootResult(data: { roots?: SourceRoot[]; releases?: ReleaseInfo[] }) {
     setSourceRoots(data.roots || []);
     setStatus((current) => current ? { ...current, available_versions: data.releases || current.available_versions } : current);
-    if (!version && data.releases?.length) {
-      setVersion(data.releases[0].version);
+    const releases = mergeReleases(data.releases || []);
+    if (releases.length) {
+      setVersion((current) => current || releases[0].version);
+      setIndexRefreshKey((key) => key + 1);
     }
   }
 
@@ -752,7 +863,7 @@ export default function App() {
       }
       applySourceRootResult(data);
       setSourcePath("");
-      flash("已绑定词典文件夹，可以开始查询");
+      flash("已绑定词典文件夹，正在建立本地索引");
     } catch (error) {
       flash((error as Error).message || "无法打开文件夹选择器");
     } finally {
@@ -774,7 +885,7 @@ export default function App() {
       }, "导入目录失败");
       applySourceRootResult(data);
       setSourcePath("");
-      flash("已绑定词典文件夹，可以开始查询");
+      flash("已绑定词典文件夹，正在建立本地索引");
     } catch (error) {
       flash((error as Error).message || "导入目录失败");
     } finally {
@@ -783,13 +894,20 @@ export default function App() {
   }
 
   async function reindexCurrentVersion() {
+    if (!version) {
+      flash("请先绑定并选择一个 MedDRA 版本");
+      return;
+    }
     setImportingSource(true);
     try {
-      const data = await fetchJson<{ version: string }>(apiPath("/reindex", version), { method: "POST" }, "重建索引失败");
-      flash(`已重建 MedDRA ${data.version}`);
-      setStatus(await fetchJson<Status>(apiPath("/status", data.version), undefined, "状态刷新失败"));
+      const data = await fetchJson<IndexStatus>(apiPath("/reindex", version), { method: "POST" }, "重建索引失败");
+      setIndexStatus(data);
+      setStatusLoading(data.state !== "ready");
+      setStatusNotice(indexProgressNotice(data));
+      setIndexRefreshKey((key) => key + 1);
+      flash(`已开始重建 MedDRA ${data.version || version} 索引`);
     } catch (error) {
-      flash((error as Error).message || "重建索引失败");
+      handleApiError(error, "重建索引失败");
     } finally {
       setImportingSource(false);
     }
@@ -875,8 +993,8 @@ export default function App() {
               setSmqDetail(null);
             }}
           >
-            {!status?.available_versions?.length && <option value="">未绑定词典</option>}
-            {status?.available_versions?.map((release) => (
+            {!availableVersions.length && <option value="">未绑定词典</option>}
+            {availableVersions.map((release) => (
               <option key={release.version} value={release.version}>
                 MedDRA {release.version}（{releaseLanguageLabel(release)}）
               </option>
@@ -907,6 +1025,8 @@ export default function App() {
         </div>
       </header>
 
+      <IndexProgressPanel status={indexStatus} visible={Boolean(indexStatus && (statusLoading || indexStatus.state !== "ready"))} />
+
       <div className="workspace" ref={workspaceRef} style={workspaceStyle}>
         <aside className="left-pane">
           <div className="pane-tabs">
@@ -918,21 +1038,25 @@ export default function App() {
             </button>
           </div>
           <div className="tree-scroll">
-            {(treeTab === "soc" ? socRoots : smqRoots).map((node) => (
-              <TreeRow
-                key={`${treeTab}:${node.code || node.smq_code}`}
-                node={node}
-                depth={0}
-                treeTab={treeTab}
-                expanded={expanded}
-                onExpand={expandTree}
-                onOpen={(opened) =>
-                  treeTab === "soc"
-                    ? loadDetail(opened.level, opened.code || "")
-                    : loadSmqDetail(opened.smq_code || opened.code || "")
-                }
-              />
-            ))}
+            {!versionReady ? (
+              <EmptyState text={statusLoading ? "词典索引正在准备，完成后这里会显示SOC/SMQ层级。" : "请先在设置中绑定MedDRA词典文件夹。"} />
+            ) : (
+              (treeTab === "soc" ? socRoots : smqRoots).map((node) => (
+                <TreeRow
+                  key={`${treeTab}:${node.code || node.smq_code}`}
+                  node={node}
+                  depth={0}
+                  treeTab={treeTab}
+                  expanded={expanded}
+                  onExpand={expandTree}
+                  onOpen={(opened) =>
+                    treeTab === "soc"
+                      ? loadDetail(opened.level, opened.code || "")
+                      : loadSmqDetail(opened.smq_code || opened.code || "")
+                  }
+                />
+              ))
+            )}
           </div>
         </aside>
 
@@ -958,7 +1082,7 @@ export default function App() {
           {module === "search" && (
             <section className="module">
               <div className="query-bar">
-                <input value={query} onChange={(event) => setQuery(event.target.value)} onKeyDown={(event) => event.key === "Enter" && versionReady && performSearch()} placeholder={SEARCH_PLACEHOLDER} />
+                <input value={query} onChange={(event) => setQuery(event.target.value)} onKeyDown={(event) => event.key === "Enter" && performSearch()} placeholder={SEARCH_PLACEHOLDER} />
                 <button className="primary" onClick={() => performSearch()} disabled={loading || !versionReady}>
                   <Search size={16} /> 搜索
                 </button>
@@ -1138,7 +1262,7 @@ export default function App() {
                 </div>
               )}
               <div className="release-list">
-                {status?.available_versions?.map((release) => (
+                {availableVersions.map((release) => (
                   <div key={release.version}>
                     <strong>MedDRA {release.version}</strong>
                     <span>{releaseLanguageLabel(release)}</span>
@@ -1184,6 +1308,30 @@ export default function App() {
 
       {toast && <div className="toast">{toast}</div>}
     </div>
+  );
+}
+
+function IndexProgressPanel({ status, visible }: { status: IndexStatus | null; visible: boolean }) {
+  if (!visible || !status) {
+    return <div className="index-progress-panel is-hidden" aria-hidden="true" />;
+  }
+  const percent = indexPercent(status);
+  const rows = status.total_rows
+    ? `${formatInteger(status.processed_rows)} / ${formatInteger(status.total_rows)} 条处理记录`
+    : "正在统计处理记录";
+  const label = status.state === "error" ? "索引失败" : status.state === "ready" ? "索引完成" : "正在建立本地索引";
+  return (
+    <section className={`index-progress-panel state-${status.state}`} aria-live="polite">
+      <div className="index-progress-copy">
+        <strong>{label}</strong>
+        <span>MedDRA {status.version || "本地词典"} · {status.message || "准备中"}</span>
+        <em>{rows}</em>
+      </div>
+      <div className="index-progress-meter" role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={percent}>
+        <span style={{ width: `${percent}%` }} />
+      </div>
+      <b>{percent}%</b>
+    </section>
   );
 }
 

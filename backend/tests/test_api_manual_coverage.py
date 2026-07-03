@@ -10,16 +10,24 @@ from fastapi.testclient import TestClient
 if not os.environ.get("MEDDRA_SOURCE_ROOT"):
     os.environ["MEDDRA_SOURCE_ROOT"] = str(Path(__file__).resolve().parents[3])
 
-from app.main import app
+from app.main import INDEX_JOBS, INDEX_LOCK, app, index_job_key, index_status_for_config
+from app.meddra_data import MeddraIndexer, default_source_config
 
 
 class ApiManualCoverageTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
-        cls.client = TestClient(app)
         cls.version = "29.0"
+        MeddraIndexer(default_source_config(cls.version)).ensure_index(force=True)
+        cls.client = TestClient(app)
 
     def test_status_and_version_discovery(self) -> None:
+        index_status = self.client.get("/api/index-status", params={"version": self.version}).json()
+        self.assertEqual(index_status["state"], "ready")
+        self.assertEqual(index_status["percent"], 100)
+        self.assertIn("processed_rows", index_status)
+        self.assertIn("total_rows", index_status)
+
         status = self.client.get("/api/status", params={"version": self.version}).json()
         self.assertEqual(status["version"], self.version)
         self.assertNotIn("db_path", status)
@@ -174,6 +182,37 @@ class ApiManualCoverageTests(unittest.TestCase):
             result = self.client.post("/api/source-roots/pick")
         self.assertEqual(result.status_code, 200)
         self.assertEqual(result.json()["status"], "cancelled")
+
+    def test_business_api_returns_json_while_index_not_ready(self) -> None:
+        with patch("app.main.index_status_for_config", return_value={"state": "running", "percent": 32}):
+            result = self.client.get("/api/tree/soc", params={"version": self.version})
+        self.assertEqual(result.status_code, 425)
+        self.assertEqual(result.json()["detail"]["error"], "index_not_ready")
+
+    def test_running_reindex_status_takes_priority_over_existing_current_index(self) -> None:
+        config = default_source_config(self.version)
+        key = index_job_key(config)
+        with INDEX_LOCK:
+            INDEX_JOBS[key] = {
+                "version": self.version,
+                "state": "running",
+                "phase": "terms",
+                "message": "载入术语文件",
+                "percent": 12,
+                "processed_rows": 1200,
+                "total_rows": 10000,
+                "started_at": 1,
+                "updated_at": 2,
+                "error": "",
+            }
+        try:
+            status = index_status_for_config(config)
+            self.assertEqual(status["state"], "running")
+            self.assertEqual(status["percent"], 12)
+            self.assertEqual(status["processed_rows"], 1200)
+        finally:
+            with INDEX_LOCK:
+                INDEX_JOBS.pop(key, None)
 
 
 if __name__ == "__main__":

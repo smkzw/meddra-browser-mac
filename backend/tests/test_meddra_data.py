@@ -41,7 +41,8 @@ class MeddraDataTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.config = default_source_config("29.0")
-        MeddraIndexer(cls.config).ensure_index(force=True)
+        cls.progress_events: list[dict[str, object]] = []
+        MeddraIndexer(cls.config, progress_callback=cls.progress_events.append).ensure_index(force=True)
         cls.store = MeddraStore(cls.config)
 
     def test_release_discovery_keeps_29_0_as_test_fixture_not_hardcoded_default(self) -> None:
@@ -76,6 +77,16 @@ class MeddraDataTests(unittest.TestCase):
         for lang in ["en", "zh"]:
             for file_name, expected in EXPECTED_COUNTS.items():
                 self.assertEqual(counts[(lang, file_name)], expected, (lang, file_name))
+
+    def test_indexer_progress_reports_real_row_counts(self) -> None:
+        self.assertTrue(self.progress_events)
+        self.assertEqual(self.progress_events[-1]["percent"], 100)
+        row_events = [row for row in self.progress_events if int(row.get("total_rows") or 0) > 100000]
+        self.assertTrue(row_events)
+        self.assertTrue(any(int(row.get("processed_rows") or 0) > 0 for row in row_events))
+        processed_values = [int(row.get("processed_rows") or 0) for row in row_events]
+        self.assertEqual(processed_values, sorted(processed_values))
+        self.assertGreaterEqual(int(row_events[-1].get("processed_rows") or 0), int(row_events[-1].get("total_rows") or 0))
 
     def test_golden_terms_have_bilingual_names_and_hierarchy(self) -> None:
         rhabdo = self.store.details("PT", "10039020")

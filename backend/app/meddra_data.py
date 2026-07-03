@@ -12,7 +12,7 @@ from difflib import SequenceMatcher
 from functools import lru_cache
 from hashlib import sha1
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable
 
 
 LEVELS = ["SOC", "HLGT", "HLT", "PT", "LLT"]
@@ -53,6 +53,19 @@ SEARCH_LABELS = {
 }
 
 SCOPE_LABELS = {"1": "广义", "2": "狭义"}
+PROGRESS_FILES = [
+    "soc.asc",
+    "hlgt.asc",
+    "hlt.asc",
+    "pt.asc",
+    "llt.asc",
+    "mdhier.asc",
+    "hlt_pt.asc",
+    "hlgt_hlt.asc",
+    "soc_hlgt.asc",
+    "smq_list.asc",
+]
+ProgressCallback = Callable[[dict[str, Any]], None]
 
 
 @dataclass(frozen=True)
@@ -456,29 +469,98 @@ def split_dollar_line(line: str) -> list[str]:
 
 
 class MeddraIndexer:
-    def __init__(self, config: SourceConfig | None = None):
+    def __init__(self, config: SourceConfig | None = None, progress_callback: ProgressCallback | None = None):
         self.config = config or default_source_config()
+        self.progress_callback = progress_callback
+        self._progress_total_rows = 0
+        self._progress_processed_rows = 0
 
     def ensure_index(self, *, force: bool = False) -> None:
         if self.config.db_path.exists():
             if force or not self._index_is_current():
-                self._delete_index()
+                pass
             else:
+                self._report_progress("ready", "索引已可用", percent=100)
                 return
         language_dirs = self._language_dirs()
         if not language_dirs:
             raise RuntimeError("未配置可用的英文或中文MedDRA ASCII目录")
         self.config.db_path.parent.mkdir(parents=True, exist_ok=True)
-        with sqlite3.connect(self.config.db_path) as con:
-            con.row_factory = sqlite3.Row
-            self._create_schema(con)
-            for index, (lang, base) in enumerate(language_dirs):
-                self._load_language(con, lang, base, load_smq_content=index == 0)
-            self._merge_terms(con)
-            self._load_synonyms(con)
-            self._build_fts(con)
-            self._write_metadata(con)
-            con.commit()
+        progress_counts = self._progress_row_counts(language_dirs)
+        self._progress_total_rows = max(1, self._progress_total_from_counts(progress_counts, language_dirs))
+        self._progress_processed_rows = 0
+        self._report_progress("preparing", "准备创建本地索引", percent=0)
+
+        temp_path = self.config.db_path.with_name(f".{self.config.db_path.name}.{os.getpid()}.{id(self)}.tmp")
+        self._delete_index(temp_path)
+        try:
+            with sqlite3.connect(temp_path) as con:
+                con.row_factory = sqlite3.Row
+                self._create_schema(con)
+                for index, (lang, base) in enumerate(language_dirs):
+                    self._load_language(con, lang, base, load_smq_content=index == 0, row_counts=progress_counts)
+                self._report_progress("merging", "合并中英文术语与层级关系")
+                self._merge_terms(con)
+                self._report_progress("synonyms", "载入同义词表")
+                self._load_synonyms(con)
+                self._report_progress("fts", "构建全文搜索索引")
+                self._build_fts(con)
+                self._report_progress("metadata", "写入索引元数据")
+                self._write_metadata(con)
+                con.commit()
+            self._delete_index()
+            temp_path.replace(self.config.db_path)
+            self._report_progress("ready", "索引完成", percent=100)
+        finally:
+            self._delete_index(temp_path)
+
+    def is_current(self) -> bool:
+        return self.config.db_path.exists() and self._index_is_current()
+
+    def _report_progress(self, phase: str, message: str, *, percent: int | None = None) -> None:
+        if not self.progress_callback:
+            return
+        if percent is None:
+            percent = min(99, int(self._progress_processed_rows * 100 / max(1, self._progress_total_rows)))
+        self.progress_callback(
+            {
+                "phase": phase,
+                "message": message,
+                "processed_rows": self._progress_processed_rows,
+                "total_rows": self._progress_total_rows,
+                "percent": percent,
+            }
+        )
+
+    def _advance_rows(self, phase: str, message: str, rows: int) -> None:
+        self._progress_processed_rows = min(self._progress_total_rows, self._progress_processed_rows + max(0, rows))
+        self._report_progress(phase, message)
+
+    def _progress_row_counts(self, language_dirs: list[tuple[str, Path]]) -> dict[tuple[str, str], int]:
+        counts: dict[tuple[str, str], int] = {}
+        for lang, base in language_dirs:
+            for file_name in [*PROGRESS_FILES, "smq_content.asc", "intl_ord.asc"]:
+                path = base / file_name
+                if not path.exists():
+                    counts[(lang, file_name)] = 0
+                    continue
+                counts[(lang, file_name)] = len(read_asc(path))
+        return counts
+
+    def _progress_total_from_counts(self, counts: dict[tuple[str, str], int], language_dirs: list[tuple[str, Path]]) -> int:
+        total = 0
+        for index, (lang, _base) in enumerate(language_dirs):
+            for file_name in PROGRESS_FILES:
+                total += counts.get((lang, file_name), 0)
+            # LLT rows are processed again to derive PT -> LLT relationships.
+            total += counts.get((lang, "llt.asc"), 0)
+            if index == 0:
+                total += counts.get((lang, "smq_content.asc"), 0)
+            total += counts.get((lang, "intl_ord.asc"), 0)
+        for lang, path in [("en", self.config.synonym_english), ("zh", self.config.synonym_chinese)]:
+            if path.exists():
+                total += len(read_asc(path))
+        return total
 
     def _source_signature(self) -> str:
         parts = [INDEX_SIGNATURE_VERSION, f"version:{self.config.version}"]
@@ -517,11 +599,12 @@ class MeddraIndexer:
             ("source_signature", self._source_signature()),
         )
 
-    def _delete_index(self) -> None:
+    def _delete_index(self, db_path: Path | None = None) -> None:
+        target = db_path or self.config.db_path
         for path in [
-            self.config.db_path,
-            self.config.db_path.with_name(f"{self.config.db_path.name}-wal"),
-            self.config.db_path.with_name(f"{self.config.db_path.name}-shm"),
+            target,
+            target.with_name(f"{target.name}-wal"),
+            target.with_name(f"{target.name}-shm"),
         ]:
             try:
                 path.unlink()
@@ -539,7 +622,7 @@ class MeddraIndexer:
     def _create_schema(self, con: sqlite3.Connection) -> None:
         con.executescript(
             """
-            pragma journal_mode = wal;
+            pragma journal_mode = delete;
             drop table if exists source_counts;
             drop table if exists raw_terms;
             drop table if exists terms;
@@ -679,7 +762,15 @@ class MeddraIndexer:
             """
         )
 
-    def _load_language(self, con: sqlite3.Connection, lang: str, base: Path, *, load_smq_content: bool) -> None:
+    def _load_language(
+        self,
+        con: sqlite3.Connection,
+        lang: str,
+        base: Path,
+        *,
+        load_smq_content: bool,
+        row_counts: dict[tuple[str, str], int],
+    ) -> None:
         required = [
             "soc.asc",
             "hlgt.asc",
@@ -694,16 +785,14 @@ class MeddraIndexer:
             "smq_content.asc",
         ]
         for name in required:
-            rows = read_asc(base / name)
             con.execute(
                 "insert into source_counts(lang, file_name, row_count) values (?, ?, ?)",
-                (lang, name, len(rows)),
+                (lang, name, row_counts.get((lang, name), 0)),
             )
         if (base / "intl_ord.asc").exists():
-            rows = read_asc(base / "intl_ord.asc")
             con.execute(
                 "insert into source_counts(lang, file_name, row_count) values (?, ?, ?)",
-                (lang, "intl_ord.asc", len(rows)),
+                (lang, "intl_ord.asc", row_counts.get((lang, "intl_ord.asc"), 0)),
             )
         self._load_terms(con, lang, base)
         self._load_hierarchy(con, lang, base)
@@ -712,23 +801,30 @@ class MeddraIndexer:
         self._load_smq(con, lang, base, load_smq_content=load_smq_content)
 
     def _load_terms(self, con: sqlite3.Connection, lang: str, base: Path) -> None:
-        for parts in read_asc(base / "soc.asc"):
+        rows = read_asc(base / "soc.asc")
+        for parts in rows:
             con.execute(
                 "insert into raw_terms values (?, 'SOC', ?, ?, null, null, ?)",
                 (lang, parts[0], parts[1], parts[2] if len(parts) > 2 else ""),
             )
+        self._advance_rows("terms", f"读取 {lang} SOC", len(rows))
         for filename, level in [("hlgt.asc", "HLGT"), ("hlt.asc", "HLT")]:
-            for parts in read_asc(base / filename):
+            rows = read_asc(base / filename)
+            for parts in rows:
                 con.execute(
                     "insert into raw_terms values (?, ?, ?, ?, null, null, null)",
                     (lang, level, parts[0], parts[1]),
                 )
-        for parts in read_asc(base / "pt.asc"):
+            self._advance_rows("terms", f"读取 {lang} {level}", len(rows))
+        rows = read_asc(base / "pt.asc")
+        for parts in rows:
             con.execute(
                 "insert into raw_terms values (?, 'PT', ?, ?, null, 'Y', null)",
                 (lang, parts[0], parts[1]),
             )
-        for parts in read_asc(base / "llt.asc"):
+        self._advance_rows("terms", f"读取 {lang} PT", len(rows))
+        rows = read_asc(base / "llt.asc")
+        for parts in rows:
             con.execute(
                 "insert into raw_terms values (?, 'LLT', ?, ?, ?, ?, null)",
                 (
@@ -739,9 +835,11 @@ class MeddraIndexer:
                     parts[9] if len(parts) > 9 else "Y",
                 ),
             )
+        self._advance_rows("terms", f"读取 {lang} LLT", len(rows))
 
     def _load_hierarchy(self, con: sqlite3.Connection, lang: str, base: Path) -> None:
-        for idx, parts in enumerate(read_asc(base / "mdhier.asc")):
+        rows = read_asc(base / "mdhier.asc")
+        for idx, parts in enumerate(rows):
             if len(parts) < 12:
                 continue
             occurrence_key = f"{lang}:{idx}:{parts[0]}:{parts[3]}"
@@ -764,6 +862,7 @@ class MeddraIndexer:
                     occurrence_key,
                 ),
             )
+        self._advance_rows("hierarchy", f"读取 {lang} MDHIER", len(rows))
 
     def _load_relations(self, con: sqlite3.Connection, lang: str, base: Path) -> None:
         relation_files = [
@@ -772,24 +871,29 @@ class MeddraIndexer:
             ("hlt_pt.asc", "HLT_PT"),
         ]
         for filename, relation in relation_files:
-            for parts in read_asc(base / filename):
+            rows = read_asc(base / filename)
+            for parts in rows:
                 if len(parts) >= 2:
                     con.execute(
                         "insert or ignore into relations values (?, ?, ?, ?)",
                         (lang, relation, parts[0], parts[1]),
                     )
-        for parts in read_asc(base / "llt.asc"):
+            self._advance_rows("relations", f"读取 {lang} {relation}", len(rows))
+        rows = read_asc(base / "llt.asc")
+        for parts in rows:
             if len(parts) >= 3:
                 con.execute(
                     "insert or ignore into relations values (?, 'PT_LLT', ?, ?)",
                     (lang, parts[2], parts[0]),
                 )
+        self._advance_rows("relations", f"建立 {lang} PT-LLT 关系", len(rows))
 
     def _load_soc_order(self, con: sqlite3.Connection, lang: str, base: Path) -> None:
         path = base / "intl_ord.asc"
         if not path.exists():
             return
-        for parts in read_asc(path):
+        rows = read_asc(path)
+        for parts in rows:
             if len(parts) < 2:
                 continue
             try:
@@ -800,9 +904,11 @@ class MeddraIndexer:
                 "insert or ignore into soc_order values (?, ?, ?)",
                 (lang, parts[1], sort_order),
             )
+        self._advance_rows("soc_order", f"读取 {lang} SOC排序", len(rows))
 
     def _load_smq(self, con: sqlite3.Connection, lang: str, base: Path, *, load_smq_content: bool) -> None:
-        for parts in read_asc(base / "smq_list.asc"):
+        rows = read_asc(base / "smq_list.asc")
+        for parts in rows:
             padded = parts + [""] * 10
             con.execute(
                 "insert into smq_list_raw values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
@@ -819,13 +925,16 @@ class MeddraIndexer:
                     padded[8],
                 ),
             )
+        self._advance_rows("smq", f"读取 {lang} SMQ列表", len(rows))
         if load_smq_content:
-            for parts in read_asc(base / "smq_content.asc"):
+            rows = read_asc(base / "smq_content.asc")
+            for parts in rows:
                 padded = parts + [""] * 10
                 con.execute(
                     "insert or ignore into smq_content values (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     tuple(padded[:9]),
                 )
+            self._advance_rows("smq", f"读取 {lang} SMQ内容", len(rows))
 
     def _merge_terms(self, con: sqlite3.Connection) -> None:
         con.execute(
@@ -910,7 +1019,8 @@ class MeddraIndexer:
         for lang, path in [("en", self.config.synonym_english), ("zh", self.config.synonym_chinese)]:
             if not path.exists():
                 continue
-            for parts in read_asc(path):
+            rows = read_asc(path)
+            for parts in rows:
                 if len(parts) < 2:
                     continue
                 weight = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else None
@@ -918,6 +1028,7 @@ class MeddraIndexer:
                     "insert or ignore into synonyms values (?, ?, ?, ?)",
                     (lang, parts[0].strip(), parts[1].strip(), weight),
                 )
+            self._advance_rows("synonyms", f"读取 {lang} 同义词表", len(rows))
 
     def _build_fts(self, con: sqlite3.Connection) -> None:
         con.execute(

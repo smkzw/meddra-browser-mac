@@ -15,7 +15,7 @@ button { border: 0; cursor: pointer; }
   height: 100%;
   min-width: 360px;
   display: grid;
-  grid-template-rows: 64px 1fr;
+  grid-template-rows: 64px auto 1fr;
   background: #eef2ef;
 }
 
@@ -64,6 +64,95 @@ button { border: 0; cursor: pointer; }
   color: #52645d;
   font-size: 12px;
   line-height: 1.35;
+}
+
+.index-progress-panel {
+  min-height: 46px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 260px 54px;
+  align-items: center;
+  gap: 12px;
+  padding: 7px 18px;
+  border-bottom: 1px solid #cfe0d8;
+  background: #edf7f3;
+}
+.index-progress-panel.is-hidden {
+  min-height: 0;
+  height: 0;
+  padding: 0;
+  border: 0;
+  overflow: hidden;
+}
+.index-progress-panel.state-error {
+  border-color: #ead0cf;
+  background: #fff3f2;
+}
+.index-progress-copy {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: center;
+  color: #2c3d36;
+  font-size: 13px;
+}
+.index-progress-copy strong {
+  color: #165847;
+  white-space: nowrap;
+}
+.state-error .index-progress-copy strong {
+  color: #963232;
+}
+.index-progress-copy span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.index-progress-copy em,
+.index-progress-panel b {
+  color: #52645d;
+  font-style: normal;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.index-progress-meter {
+  height: 8px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: #d5e5dd;
+}
+.index-progress-meter span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: #267464;
+  transition: width 160ms ease;
+}
+.state-error .index-progress-meter span {
+  background: #b64b4b;
+}
+.index-progress-panel b {
+  text-align: right;
+  font-size: 13px;
+}
+
+@media (max-width: 980px) {
+  .index-progress-panel {
+    grid-template-columns: minmax(0, 1fr) 90px;
+    gap: 8px;
+  }
+  .index-progress-copy {
+    grid-column: 1 / 3;
+    grid-template-columns: auto minmax(0, 1fr);
+  }
+  .index-progress-copy em {
+    grid-column: 1 / 3;
+  }
+  .index-progress-meter {
+    grid-column: 1;
+  }
 }
 
 .segmented, .pane-tabs, .module-nav {
