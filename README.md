@@ -14,6 +14,8 @@
 - `meddra-browser-portable.zip`：Windows 和 Mac 都能用。适合不想安装 App，或想放在 U 盘、移动硬盘里用。
 - `MedDRA-Browser-Windows-Emergency-v0.1.9.zip`：Windows 同事临时应急优先用这个。它和便携版功能一致，文件名更直观，并且包内带 Windows 运行环境。
 
+如果暂时没有 Apple Developer Program，不影响使用上面这些包。它们不能上架 Mac App Store，也没有 Apple 公证；Mac 首次打开时可能需要右键选择“打开”。详细说明见 `docs/no-apple-developer-program-distribution-zh.md`。
+
 ## Mac App 用法
 
 1. 下载 `meddra-browser-mac-app.zip`，解压。
@@ -137,6 +139,7 @@ open http://127.0.0.1:8765/
 打包：
 
 ```bash
+./scripts/build_free_release.sh
 ./scripts/build_macos_app.sh "/Applications/MedDRA Browser Mac.app"
 ./scripts/build_portable_package.sh
 ```
@@ -148,6 +151,14 @@ MEDDRA_BROWSER_URL=http://127.0.0.1:8765/ python3 scripts/playwright_smoke.py
 ```
 
 发布包不应包含 MedDRA 原始数据、SQLite 缓存、`pyc` 文件或本机路径。
+
+Mac App Store 上架准备：
+
+```bash
+APP_STORE_BUNDLE_ID=com.yourcompany.meddra-browser ./scripts/preflight_app_store.sh
+```
+
+详细步骤、审核备注、隐私答复和元数据草稿见 `docs/app-store/APP_STORE_SUBMISSION_ZH.md`。
 
 ## License
 

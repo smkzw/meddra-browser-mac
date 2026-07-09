@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from functools import lru_cache
+import os
 from pathlib import Path
 import sqlite3
 import subprocess
@@ -263,6 +264,9 @@ def require_ready_store(version: Optional[str] = None) -> MeddraStore:
 
 
 def pick_dictionary_directory() -> Path | None:
+    if os.environ.get("MEDDRA_APP_STORE_MODE") == "1":
+        raise RuntimeError("App Store沙盒候选模式需要原生文件夹选择器和安全作用域书签；当前脚本壳不启用AppleScript文件夹选择")
+
     if sys.platform == "darwin":
         script = 'POSIX path of (choose folder with prompt "请选择MedDRA ASCII词典文件夹或其上级文件夹")'
         command = ["osascript", "-e", script]
