@@ -10,6 +10,10 @@ backend/tests/__pycache__/
 *.pyc
 .venv/
 .venv_windows/
+.qa-state/
+.qa-extract/
+portable-active-port.js
+当前服务地址.txt
 dictionaries/
 frontend/node_modules/
 frontend/dist/

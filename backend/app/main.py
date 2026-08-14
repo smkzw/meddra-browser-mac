@@ -44,6 +44,28 @@ if (FRONTEND_DIST / "assets").exists():
     app.mount("/assets", StaticFiles(directory=FRONTEND_DIST / "assets"), name="assets")
 
 
+@app.middleware("http")
+async def allow_private_network_access(request: Request, call_next):  # type: ignore[no-untyped-def]
+    requested = request.headers.get("access-control-request-private-network", "").lower() == "true"
+    if request.method == "OPTIONS" and requested:
+        origin = request.headers.get("origin") or "null"
+        return Response(
+            status_code=200,
+            headers={
+                "Access-Control-Allow-Origin": origin,
+                "Access-Control-Allow-Methods": request.headers.get("access-control-request-method", "GET"),
+                "Access-Control-Allow-Headers": request.headers.get("access-control-request-headers", "*"),
+                "Access-Control-Allow-Private-Network": "true",
+                "Access-Control-Allow-Credentials": "true",
+                "Cache-Control": "no-store",
+            },
+        )
+    response = await call_next(request)
+    if requested or request.url.path.startswith("/api/runtime-info"):
+        response.headers["Access-Control-Allow-Private-Network"] = "true"
+    return response
+
+
 INDEX_LOCK = threading.Lock()
 INDEX_JOBS: dict[str, dict[str, Any]] = {}
 

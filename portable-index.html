@@ -58,6 +58,25 @@
         border-radius: 8px;
         background: #edf7f3;
       }
+      .status-actions {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        flex-wrap: wrap;
+      }
+      button {
+        padding: 9px 14px;
+        border: 1px solid #126451;
+        border-radius: 7px;
+        color: #fff;
+        background: #126451;
+        font: inherit;
+        font-weight: 700;
+        cursor: pointer;
+      }
+      button:hover {
+        background: #0d4f40;
+      }
       .steps {
         display: grid;
         gap: 10px;
@@ -181,32 +200,109 @@
         return jsonpRuntimeInfo(port);
       }
 
+      function loadSidecarRuntime() {
+        return new Promise((resolve) => {
+          if (window.__MEDDRA_PORTABLE_RUNTIME && window.__MEDDRA_PORTABLE_RUNTIME.url) {
+            resolve(window.__MEDDRA_PORTABLE_RUNTIME);
+            return;
+          }
+          const script = document.createElement("script");
+          const finish = (value) => {
+            script.remove();
+            resolve(value);
+          };
+          script.async = true;
+          script.onload = () => finish(window.__MEDDRA_PORTABLE_RUNTIME || null);
+          script.onerror = () => finish(null);
+          script.src = "portable-active-port.js?t=" + Date.now();
+          document.head.appendChild(script);
+        });
+      }
+
+      function candidatePorts(sidecarPort = null) {
+        const ports = [];
+        const push = (port) => {
+          if (Number.isInteger(port) && port >= 1024 && port <= 65535 && !ports.includes(port)) {
+            ports.push(port);
+          }
+        };
+        if (Number.isInteger(sidecarPort)) push(sidecarPort);
+        const hint = hintedPort();
+        if (hint !== null) {
+          for (let index = 0; index < SCAN_WIDTH; index += 1) push(hint + index);
+        }
+        for (let index = 0; index < SCAN_WIDTH; index += 1) push(DEFAULT_PORT + index);
+        return ports;
+      }
+
       let attempts = 0;
+      let retryTimer = null;
+      const MAX_AUTOMATIC_ATTEMPTS = 30;
+
+      function setStatus(message, allowRetry = false) {
+        const status = document.getElementById("status");
+        const retry = document.getElementById("retry");
+        status.textContent = message;
+        retry.hidden = !allowRetry;
+      }
 
       async function checkServer() {
-        const status = document.getElementById("status");
-        const ports = candidatePorts();
+        const sidecar = await loadSidecarRuntime();
+        const sidecarReady = Boolean(
+          sidecar &&
+          sidecar.ready === true &&
+          sidecar.distribution_mode === "portable" &&
+          sidecar.app_store_mode === false &&
+          typeof sidecar.url === "string" &&
+          Number.isInteger(sidecar.port)
+        );
+        const ports = candidatePorts(sidecarReady ? sidecar.port : null);
         const candidates = await Promise.all(ports.map(async (port) => {
           const info = await probePort(port);
           return info ? { port, base: `http://127.0.0.1:${port}`, info } : null;
         }));
-        // Keep candidate priority: the hinted window is probed first, then the
-        // default range. Promise.all preserves input order, so the first hit is
-        // the highest-priority port rather than whichever replied fastest.
         const portable = candidates.find(Boolean);
         if (portable) {
-          status.textContent = `本地服务已启动（端口 ${portable.port}），正在打开浏览器界面...`;
+          setStatus(`本地服务已启动（端口 ${portable.port}），正在打开浏览器界面...`);
           window.location.href = `${portable.base}/`;
           return;
         }
+
+        // A file:// page can be denied every localhost probe by the browser.
+        // The launcher writes this sidecar only after the service is ready, so
+        // it is a safe last-resort handoff for that specific origin.
+        if (window.location.protocol === "file:" && sidecarReady) {
+          setStatus("浏览器限制了本机探测，正在使用第一步写入的服务地址 " + sidecar.url + " ...");
+          window.location.href = sidecar.url;
+          return;
+        }
+
         attempts += 1;
         const scanned = `${ports[0]}-${ports[ports.length - 1]}`;
-        status.textContent =
+        if (attempts >= MAX_AUTOMATIC_ATTEMPTS) {
+          setStatus(
+            `暂时没有检测到便携版服务（已检测端口 ${scanned}）。请先启动对应系统的“第一步”文件，` +
+            "保持窗口打开后点击“重新检测”。",
+            true,
+          );
+          return;
+        }
+        setStatus(
           `还没有检测到便携版服务（已检测端口 ${scanned}，第 ${attempts} 次）；` +
-          "请先启动对应系统的“第一步”文件，并保持那个窗口不要关闭。";
-        window.setTimeout(checkServer, 2000);
+          "请先启动对应系统的“第一步”文件，并保持那个窗口不要关闭。",
+        );
+        retryTimer = window.setTimeout(checkServer, 2000);
       }
-      window.addEventListener("DOMContentLoaded", checkServer);
+      window.addEventListener("DOMContentLoaded", () => {
+        document.getElementById("retry").addEventListener("click", () => {
+          if (retryTimer !== null) window.clearTimeout(retryTimer);
+          retryTimer = null;
+          attempts = 0;
+          setStatus("正在重新检测本地服务...");
+          checkServer();
+        });
+        checkServer();
+      });
     </script>
   </head>
   <body>
@@ -230,7 +326,10 @@
         </div>
       </div>
       <p>进入系统后，如果提示还没有词典，请点“选择词典文件夹”。在文件管理器或 Finder 里选你的 MedDRA 文件夹即可，比如 MedDRA_29_0_Chinese、MedDRA_29_0_English、MedAscii、ascii-290，或它们的上级文件夹。</p>
-      <div id="status" class="status">正在检测本地服务...</div>
+      <div class="status-actions">
+        <div id="status" class="status">正在检测本地服务...</div>
+        <button id="retry" type="button" hidden>重新检测</button>
+      </div>
     </main>
   </body>
 </html>

@@ -217,12 +217,37 @@ def explicit_source_roots() -> list[Path]:
     return unique
 
 
+SKIP_DIRECTORY_NAMES = {
+    ".git",
+    ".hg",
+    ".svn",
+    ".venv",
+    ".venv_macos",
+    ".venv_windows",
+    ".python_windows",
+    ".qa-extract",
+    ".qa-state",
+    ".playwright-cli",
+    "node_modules",
+    "__pycache__",
+    "wheelhouse",
+    "qa-worktrees",
+    "meddra-browser-mac",
+}
+MAX_DICTIONARY_WALK_DEPTH = 6
+MAX_DICTIONARY_WALK_DIRS = 4000
+
+
+def should_skip_directory(name: str) -> bool:
+    return name in SKIP_DIRECTORY_NAMES or name.startswith(".")
+
+
 def contains_meddra_ascii(root: Path) -> bool:
     if not root.exists() or not root.is_dir():
         return False
     try:
-        next(root.rglob("soc.asc"))
-    except (StopIteration, OSError):
+        next(iter_dictionary_dirs(root))
+    except StopIteration:
         return False
     return True
 
@@ -374,12 +399,29 @@ def iter_dictionary_dirs(root: Path) -> Iterable[Path]:
     if (root / "soc.asc").exists():
         yield root
         return
-    try:
-        soc_files = root.rglob("soc.asc")
-        for soc_file in soc_files:
-            yield soc_file.parent
-    except (OSError, PermissionError):
-        return
+    stack: list[tuple[Path, int]] = [(root, 0)]
+    seen = 0
+    while stack:
+        current, depth = stack.pop()
+        seen += 1
+        if seen > MAX_DICTIONARY_WALK_DIRS or depth > MAX_DICTIONARY_WALK_DEPTH:
+            continue
+        try:
+            if (current / "soc.asc").exists():
+                yield current
+                continue
+            children = list(current.iterdir())
+        except (OSError, PermissionError):
+            continue
+        if depth >= MAX_DICTIONARY_WALK_DEPTH:
+            continue
+        for child in children:
+            try:
+                if not child.is_dir() or should_skip_directory(child.name):
+                    continue
+            except (OSError, PermissionError):
+                continue
+            stack.append((child, depth + 1))
 
 
 def select_release(releases: list[ReleaseInfo], version: str | None = None) -> ReleaseInfo:

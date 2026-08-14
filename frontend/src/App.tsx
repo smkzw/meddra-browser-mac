@@ -297,7 +297,7 @@ function isAppStoreCandidateMessage(message: string) {
 function sourceImportErrorMessage(error: unknown, fallback: string) {
   const message = (error as Error)?.message || "";
   if (isAppStoreCandidateMessage(message)) {
-    return "当前是App Store候选版，暂不支持导入外部词典；请改用普通版MedDRA Browser Mac.app。正式沙盒版需要原生文件夹选择器和安全作用域书签。";
+    return "当前是 App Store 候选版，暂不支持从这里导入外部词典。请改用便携版或普通桌面版 MedDRA Browser。正式沙盒版需要原生文件夹选择器。";
   }
   return message || fallback;
 }

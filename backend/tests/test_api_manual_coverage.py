@@ -7,8 +7,10 @@ from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 
+from workspace_paths import workspace_dictionary_root
+
 if not os.environ.get("MEDDRA_SOURCE_ROOT"):
-    os.environ["MEDDRA_SOURCE_ROOT"] = str(Path(__file__).resolve().parents[3])
+    os.environ["MEDDRA_SOURCE_ROOT"] = str(workspace_dictionary_root())
 
 from app.main import INDEX_JOBS, INDEX_LOCK, app, index_job_key, index_status_for_config
 from app.meddra_data import MeddraIndexer, default_source_config

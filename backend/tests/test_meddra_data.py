@@ -7,8 +7,10 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
+from workspace_paths import workspace_dictionary_root
+
 if not os.environ.get("MEDDRA_SOURCE_ROOT"):
-    os.environ["MEDDRA_SOURCE_ROOT"] = str(Path(__file__).resolve().parents[3])
+    os.environ["MEDDRA_SOURCE_ROOT"] = str(workspace_dictionary_root())
 
 from app.meddra_data import (
     REQUIRED_ASC_FILES,

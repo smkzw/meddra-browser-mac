@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import atexit
 import json
 import os
 import sys
@@ -20,13 +21,21 @@ READY_URL = ""
 HTML_ENTRY = ROOT / "第二步：双击我开始MedDRA浏览.html"
 FALLBACK_HTML_ENTRY = ROOT / "index.html"
 PORT_SCAN_LIMIT = 20
+PORT_SIDECAR = ROOT / "portable-active-port.js"
+PORT_ADDRESS = ROOT / "当前服务地址.txt"
 
 
 def update_urls(port: int) -> None:
     global PORT, BASE_URL, READY_URL
     PORT = port
-    BASE_URL = f"http://{HOST}:{PORT}/"
+    BASE_URL = browser_base_url(PORT)
     READY_URL = f"{BASE_URL}api/runtime-info"
+
+
+def browser_base_url(port: int) -> str:
+    # 0.0.0.0 is a bind address, not an address a browser should navigate to.
+    browser_host = "127.0.0.1" if HOST in {"", "0.0.0.0", "::"} else HOST
+    return f"http://{browser_host}:{port}/"
 
 
 def runtime_info(port: int | None = None) -> dict[str, object] | None:
@@ -49,6 +58,42 @@ def is_portable_server(info: dict[str, object] | None) -> bool:
         and info.get("distribution_mode") == "portable"
         and info.get("app_store_mode") is False
     )
+
+
+def write_active_port_sidecar(port: int) -> None:
+    """Write a same-folder helper so the file:// step-2 page can open the
+    selected port even when Windows browsers block localhost fetch/JSONP.
+    """
+    payload = {
+        "port": port,
+        "url": browser_base_url(port),
+        "distribution_mode": "portable",
+        "app_store_mode": False,
+        "ready": True,
+    }
+    PORT_SIDECAR.write_text(
+        "window.__MEDDRA_PORTABLE_RUNTIME = "
+        + json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+        + ";\n",
+        encoding="utf-8",
+    )
+    PORT_ADDRESS.write_text(
+        f"当前便携版服务地址：{payload['url']}\n"
+        "如果浏览器没有自动打开，请把上面的地址粘贴到浏览器地址栏，"
+        "或重新双击“第二步：双击我开始MedDRA浏览.html”。\n"
+        "本文件由第一步启动器自动更新，不会上传任何数据。\n",
+        encoding="utf-8",
+    )
+
+
+def clear_active_port_sidecar() -> None:
+    for path in (PORT_SIDECAR, PORT_ADDRESS):
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            continue
+        except OSError:
+            continue
 
 
 def select_port() -> int:
@@ -101,6 +146,8 @@ def announce_ready() -> None:
 def wait_until_ready_and_open() -> None:
     for _ in range(120):
         if is_ready():
+            # Do not publish a dead URL before uvicorn is actually reachable.
+            write_active_port_sidecar(PORT)
             announce_ready()
             open_entry()
             return
@@ -121,9 +168,14 @@ def main() -> int:
     selected_port = select_port()
     update_urls(selected_port)
     if is_ready():
+        write_active_port_sidecar(selected_port)
         print(f"MedDRA Browser 已在运行：{BASE_URL}", flush=True)
         open_entry()
         return 0
+
+    # Only the process that owns uvicorn may remove the sidecar on exit. A
+    # second double-click that only reopens the browser must leave it intact.
+    atexit.register(clear_active_port_sidecar)
 
     sys.path.insert(0, str(ROOT / "backend"))
     os.environ.setdefault("PYTHONPATH", str(ROOT / "backend"))
