@@ -191,6 +191,42 @@ class ApiManualCoverageTests(unittest.TestCase):
         self.assertEqual(export.status_code, 200)
         self.assertIn("term_code", export.text)
 
+    def test_smq_child_smq_rows_are_labelled_and_named(self) -> None:
+        # SMQ 20000005 (Hepatic disorders) contains child SMQ rows carrying
+        # term_level='0'/term_scope='0' per the MSSO distribution file format.
+        # These must not surface as a bare "0" with an empty name.
+        detail = self.client.get("/api/smq/20000005", params={"version": self.version, "mode": "both"}).json()
+        self.assertTrue(detail["found"])
+
+        child_rows = [row for row in detail["content"] if row["scope"] == "0"]
+        self.assertGreater(len(child_rows), 0)
+
+        child_codes = {row["smq_code"] for row in detail["children"]}
+        for row in child_rows:
+            self.assertEqual(row["term_level"], "SMQ")
+            self.assertEqual(row["scope_label"], "子级SMQ")
+            self.assertTrue(row["en_name"] or row["zh_name"], f"child SMQ {row['term_code']} has no name")
+            self.assertIn(row["term_code"], child_codes)
+
+        # Regular member terms must keep their broad/narrow labelling.
+        member_labels = {row["scope_label"] for row in detail["content"] if row["scope"] in {"1", "2"}}
+        self.assertTrue(member_labels.issubset({"广义", "狭义"}))
+
+    def test_csv_export_starts_with_utf8_bom_for_excel(self) -> None:
+        # Excel on Chinese Windows reads CSV as GBK unless a UTF-8 BOM is present,
+        # which would garble Chinese MedDRA terms.
+        export = self.client.post(
+            "/api/export/csv",
+            json={"filename": "bom.csv", "rows": [{"code": "10039020", "name": "横纹肌溶解"}]},
+        )
+        self.assertEqual(export.status_code, 200)
+        self.assertTrue(export.content.startswith(b"\xef\xbb\xbf"))
+        self.assertIn("横纹肌溶解", export.content.decode("utf-8-sig"))
+
+        empty = self.client.post("/api/export/csv", json={"filename": "empty.csv", "rows": []})
+        self.assertEqual(empty.status_code, 200)
+        self.assertEqual(empty.content, b"")
+
     def test_synonym_list_endpoint(self) -> None:
         synonyms = self.client.get("/api/synonyms", params={"version": self.version, "lang": "en", "limit": 20}).json()
         self.assertEqual(synonyms["lang"], "en")

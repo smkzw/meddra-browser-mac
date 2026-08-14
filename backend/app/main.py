@@ -487,6 +487,10 @@ def api_smq_analysis(level: str, code: str, version: Optional[str] = Query(defau
 def api_export_csv(payload: ExportRequest) -> Response:
     csv_text = store().export_csv(payload.rows)
     filename = Path(payload.filename).name or "meddra_export.csv"
+    if csv_text and not csv_text.startswith("\ufeff"):
+        # Excel on Chinese Windows defaults to the GBK codepage and garbles UTF-8
+        # Chinese terms unless the file starts with a UTF-8 BOM.
+        csv_text = f"\ufeff{csv_text}"
     return Response(
         content=csv_text,
         media_type="text/csv; charset=utf-8",

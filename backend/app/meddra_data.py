@@ -60,7 +60,8 @@ SEARCH_LABELS = {
     "smq": "SMQ匹配",
 }
 
-SCOPE_LABELS = {"1": "广义", "2": "狭义"}
+SCOPE_LABELS = {"0": "子级SMQ", "1": "广义", "2": "狭义"}
+SMQ_CONTENT_LEVEL_LABELS = {"0": "SMQ", "4": "PT", "5": "LLT"}
 PROGRESS_FILES = [
     "soc.asc",
     "hlgt.asc",
@@ -1542,12 +1543,17 @@ class MeddraStore:
                 return {"found": False, "smq_code": smq_code}
             content = con.execute(
                 """
-                select sc.*, t.en_name, t.zh_name, t.level
+                select sc.*,
+                    coalesce(t.en_name, cs.en_name) as en_name,
+                    coalesce(t.zh_name, cs.zh_name) as zh_name,
+                    coalesce(t.level, case when cs.smq_code is not null then 'SMQ' end) as level
                 from smq_content sc
                 left join terms t on t.code=sc.term_code and
                     t.level = case sc.term_level when '4' then 'PT' when '5' then 'LLT' else t.level end
+                left join smq cs on sc.term_level='0' and cs.smq_code=sc.term_code
                 where sc.smq_code=?
-                order by cast(sc.scope as integer) desc, coalesce(t.en_name, t.zh_name, sc.term_code)
+                order by cast(sc.scope as integer) desc,
+                    coalesce(t.en_name, cs.en_name, t.zh_name, cs.zh_name, sc.term_code)
                 """,
                 (smq_code,),
             ).fetchall()
@@ -1913,7 +1919,7 @@ class MeddraStore:
         return {
             "smq_code": row["smq_code"],
             "term_code": row["term_code"],
-            "term_level": {"4": "PT", "5": "LLT"}.get(row["term_level"], row["term_level"]),
+            "term_level": SMQ_CONTENT_LEVEL_LABELS.get(row["term_level"], row["term_level"]),
             "scope": row["scope"],
             "scope_label": SCOPE_LABELS.get(row["scope"], row["scope"]),
             "status": row["status"],

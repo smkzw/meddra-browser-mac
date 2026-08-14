@@ -95,14 +95,35 @@
         );
       }
 
-      function startPort() {
+      const DEFAULT_PORT = 8765;
+      const SCAN_WIDTH = 20;
+
+      function hintedPort() {
         const queryValue = Number.parseInt(
           new URLSearchParams(window.location.search).get("port") || "",
           10
         );
         return Number.isInteger(queryValue) && queryValue >= 1024 && queryValue <= 65500
           ? queryValue
-          : 8765;
+          : null;
+      }
+
+      // The launcher honours MEDDRA_BROWSER_PORT and walks upward when a port is
+      // already taken, so the served port is not always 8765. A ?port= hint is
+      // therefore only an extra set of candidates: it must never replace the
+      // documented default range, otherwise a stale hint left over from an
+      // earlier run strands this page on "no service detected" forever.
+      function candidatePorts() {
+        const ports = [];
+        const push = (port) => {
+          if (port >= 1024 && port <= 65535 && !ports.includes(port)) ports.push(port);
+        };
+        const hint = hintedPort();
+        if (hint !== null) {
+          for (let index = 0; index < SCAN_WIDTH; index += 1) push(hint + index);
+        }
+        for (let index = 0; index < SCAN_WIDTH; index += 1) push(DEFAULT_PORT + index);
+        return ports;
       }
 
       async function fetchRuntimeInfo(port) {
@@ -160,21 +181,29 @@
         return jsonpRuntimeInfo(port);
       }
 
+      let attempts = 0;
+
       async function checkServer() {
         const status = document.getElementById("status");
-        const firstPort = startPort();
-        const ports = Array.from({ length: 20 }, (_, index) => firstPort + index);
+        const ports = candidatePorts();
         const candidates = await Promise.all(ports.map(async (port) => {
           const info = await probePort(port);
-          return info ? { base: `http://127.0.0.1:${port}`, info } : null;
+          return info ? { port, base: `http://127.0.0.1:${port}`, info } : null;
         }));
+        // Keep candidate priority: the hinted window is probed first, then the
+        // default range. Promise.all preserves input order, so the first hit is
+        // the highest-priority port rather than whichever replied fastest.
         const portable = candidates.find(Boolean);
         if (portable) {
-          status.textContent = "本地服务已启动，正在打开浏览器界面...";
+          status.textContent = `本地服务已启动（端口 ${portable.port}），正在打开浏览器界面...`;
           window.location.href = `${portable.base}/`;
           return;
         }
-        status.textContent = "还没有检测到便携版服务；请先启动对应系统的“第一步”文件，并保持窗口打开。";
+        attempts += 1;
+        const scanned = `${ports[0]}-${ports[ports.length - 1]}`;
+        status.textContent =
+          `还没有检测到便携版服务（已检测端口 ${scanned}，第 ${attempts} 次）；` +
+          "请先启动对应系统的“第一步”文件，并保持那个窗口不要关闭。";
         window.setTimeout(checkServer, 2000);
       }
       window.addEventListener("DOMContentLoaded", checkServer);

@@ -212,7 +212,10 @@ function displayName(item: { en_name?: string; zh_name?: string }, mode: Mode) {
 }
 
 function downloadText(filename: string, text: string, mime = "text/plain;charset=utf-8") {
-  const blob = new Blob([text], { type: mime });
+  // Excel on Chinese Windows assumes the system codepage (GBK) unless a UTF-8 BOM is present,
+  // which would garble Chinese MedDRA terms. JSON must stay BOM-free so JSON.parse works.
+  const needsBom = mime.includes("text/csv") && !text.startsWith("\ufeff");
+  const blob = new Blob([needsBom ? `\ufeff${text}` : text], { type: mime });
   const url = URL.createObjectURL(blob);
   const link = document.createElement("a");
   link.href = url;

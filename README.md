@@ -129,6 +129,7 @@ npm run build
 ```
 
 ```bash
+python3 -m pip install -r backend/requirements-dev.txt
 PYTHONPATH=backend python3 -m unittest discover -s backend/tests -v
 ```
 

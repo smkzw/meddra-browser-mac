@@ -86,14 +86,31 @@ def open_entry() -> None:
         webbrowser.open(BASE_URL)
 
 
+def announce_ready() -> None:
+    print(f"MedDRA Browser 已启动：{BASE_URL}", flush=True)
+    if PORT != REQUESTED_PORT:
+        # The user may close the auto-opened tab and later double-click the
+        # step-2 file. Print the real address so it can be opened by hand.
+        print(
+            f"注意：默认端口 {REQUESTED_PORT} 被其他服务占用，本次改用端口 {PORT}。"
+            f"如果第二步页面没有自动跳转，请直接在浏览器打开 {BASE_URL}",
+            flush=True,
+        )
+
+
 def wait_until_ready_and_open() -> None:
     for _ in range(120):
         if is_ready():
-            print(f"MedDRA Browser 已启动：{BASE_URL}", flush=True)
+            announce_ready()
             open_entry()
             return
         time.sleep(0.5)
-    print("MedDRA Browser 启动超时。请检查终端窗口中的错误信息。", file=sys.stderr, flush=True)
+    print(
+        "MedDRA Browser 启动超时（60 秒内没有就绪）。"
+        "请查看本窗口上方的错误信息；窗口请保持打开以便排查。",
+        file=sys.stderr,
+        flush=True,
+    )
 
 
 def main() -> int:
