@@ -40,7 +40,7 @@ class PortableDiscoveryTests(unittest.TestCase):
     def test_default_html_scan_window_misses_dedicated_8861_port(self) -> None:
         html = PORTABLE_HTML.read_text(encoding="utf-8")
         self.assertIn("8765", html)
-        self.assertIn("index < 20", html)
+        self.assertIn("index < SCAN_WIDTH", html)
         default_ports = list(range(8765, 8785))
         self.assertNotIn(8861, default_ports)
         self.assertIn("portable-active-port.js", html)
@@ -61,6 +61,8 @@ class PortableDiscoveryTests(unittest.TestCase):
             sidecar = (fake_root / "portable-active-port.js").read_text(encoding="utf-8")
             self.assertIn("8861", sidecar)
             self.assertIn("http://127.0.0.1:8861/", sidecar)
+            self.assertIn('"ready":true', sidecar)
+            self.assertFalse((fake_root / "portable-active-port.js").name.startswith("."))
             self.assertIn("window.__MEDDRA_PORTABLE_RUNTIME", sidecar)
             note = (fake_root / "当前服务地址.txt").read_text(encoding="utf-8")
             self.assertIn("http://127.0.0.1:8861/", note)

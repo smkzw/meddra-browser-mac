@@ -63,7 +63,12 @@ class PortableEntryPageSourceTests(unittest.TestCase):
 
     def test_probe_loop_uses_candidate_ports(self) -> None:
         check_source = extract_function(self.source, "checkServer")
-        self.assertIn("candidatePorts()", check_source)
+        self.assertIn("candidatePorts(", check_source)
+
+    def test_missing_service_has_bounded_retry_and_manual_recovery(self) -> None:
+        self.assertIn("MAX_AUTOMATIC_ATTEMPTS = 30", self.source)
+        self.assertIn('id="retry"', self.source)
+        self.assertIn("点击“重新检测”", self.source)
 
 
 @unittest.skipIf(shutil.which("node") is None, "node is unavailable; JS behaviour test skipped")

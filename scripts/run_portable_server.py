@@ -21,8 +21,14 @@ READY_URL = ""
 HTML_ENTRY = ROOT / "第二步：双击我开始MedDRA浏览.html"
 FALLBACK_HTML_ENTRY = ROOT / "index.html"
 PORT_SCAN_LIMIT = 20
-PORT_SIDECAR = ROOT / "portable-active-port.js"
-PORT_ADDRESS = ROOT / "当前服务地址.txt"
+
+
+def port_sidecar_path() -> Path:
+    return ROOT / "portable-active-port.js"
+
+
+def port_address_path() -> Path:
+    return ROOT / "当前服务地址.txt"
 
 
 def update_urls(port: int) -> None:
@@ -71,13 +77,13 @@ def write_active_port_sidecar(port: int) -> None:
         "app_store_mode": False,
         "ready": True,
     }
-    PORT_SIDECAR.write_text(
+    port_sidecar_path().write_text(
         "window.__MEDDRA_PORTABLE_RUNTIME = "
         + json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
         + ";\n",
         encoding="utf-8",
     )
-    PORT_ADDRESS.write_text(
+    port_address_path().write_text(
         f"当前便携版服务地址：{payload['url']}\n"
         "如果浏览器没有自动打开，请把上面的地址粘贴到浏览器地址栏，"
         "或重新双击“第二步：双击我开始MedDRA浏览.html”。\n"
@@ -87,7 +93,7 @@ def write_active_port_sidecar(port: int) -> None:
 
 
 def clear_active_port_sidecar() -> None:
-    for path in (PORT_SIDECAR, PORT_ADDRESS):
+    for path in (port_sidecar_path(), port_address_path()):
         try:
             path.unlink()
         except FileNotFoundError:

@@ -127,24 +127,6 @@
           : null;
       }
 
-      // The launcher honours MEDDRA_BROWSER_PORT and walks upward when a port is
-      // already taken, so the served port is not always 8765. A ?port= hint is
-      // therefore only an extra set of candidates: it must never replace the
-      // documented default range, otherwise a stale hint left over from an
-      // earlier run strands this page on "no service detected" forever.
-      function candidatePorts() {
-        const ports = [];
-        const push = (port) => {
-          if (port >= 1024 && port <= 65535 && !ports.includes(port)) ports.push(port);
-        };
-        const hint = hintedPort();
-        if (hint !== null) {
-          for (let index = 0; index < SCAN_WIDTH; index += 1) push(hint + index);
-        }
-        for (let index = 0; index < SCAN_WIDTH; index += 1) push(DEFAULT_PORT + index);
-        return ports;
-      }
-
       async function fetchRuntimeInfo(port) {
         const controller = new AbortController();
         const timeout = window.setTimeout(() => controller.abort(), 800);
