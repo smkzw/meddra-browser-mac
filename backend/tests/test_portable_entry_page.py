@@ -70,6 +70,11 @@ class PortableEntryPageSourceTests(unittest.TestCase):
         self.assertIn('id="retry"', self.source)
         self.assertIn("点击“重新检测”", self.source)
 
+    def test_stale_sidecar_does_not_force_dead_browser_navigation(self) -> None:
+        check_source = extract_function(self.source, "checkServer")
+        self.assertIn("sidecarProbedStale", check_source)
+        self.assertIn("!sidecarProbedStale", check_source)
+
 
 @unittest.skipIf(shutil.which("node") is None, "node is unavailable; JS behaviour test skipped")
 class PortableEntryPageBehaviourTests(unittest.TestCase):

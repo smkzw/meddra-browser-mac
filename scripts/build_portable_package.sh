@@ -23,7 +23,7 @@ if [[ ! -s "${WINDOWS_INSTALLER_PATH}" ]]; then
 fi
 
 mkdir -p "${WINDOWS_WHEELHOUSE_DIR}"
-if ls "${WINDOWS_WHEELHOUSE_DIR}"/*.whl >/dev/null 2>&1; then
+if [[ -n "$(/usr/bin/find "${WINDOWS_WHEELHOUSE_DIR}" -maxdepth 1 -type f -name '*.whl' -print -quit)" ]]; then
   echo "Reusing existing Windows wheelhouse at ${WINDOWS_WHEELHOUSE_DIR}"
 else
   python3 -m pip download \

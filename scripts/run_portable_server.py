@@ -3,6 +3,7 @@ from __future__ import annotations
 import atexit
 import json
 import os
+import signal
 import sys
 import threading
 import time
@@ -183,6 +184,23 @@ def main() -> int:
     # second double-click that only reopens the browser must leave it intact.
     atexit.register(clear_active_port_sidecar)
 
+    def _portable_signal_guard(_sig_num, _frame):  # type: ignore[no-untyped-def]
+        # Uvicorn installs its graceful handlers while its server loop is
+        # active. This guard prevents the interpreter's default handler from
+        # bypassing the cleanup path during the short startup/shutdown window.
+        return
+
+    for _signal_name in ("SIGTERM", "SIGINT", "SIGHUP"):
+        _signal_number = getattr(signal, _signal_name, None)
+        if _signal_number is None:
+            continue
+        try:
+            signal.signal(_signal_number, _portable_signal_guard)
+        except (ValueError, OSError):
+            # Some hosts (notably Windows or embedded runners) reject handler
+            # installation; atexit and the finally block remain available.
+            continue
+
     sys.path.insert(0, str(ROOT / "backend"))
     os.environ.setdefault("PYTHONPATH", str(ROOT / "backend"))
 
@@ -190,11 +208,15 @@ def main() -> int:
         import uvicorn
     except ImportError as exc:
         print("未找到后端依赖 uvicorn。请重新运行第一步入口，或检查依赖安装是否失败。", file=sys.stderr)
+        clear_active_port_sidecar()
         raise SystemExit(1) from exc
 
     threading.Thread(target=wait_until_ready_and_open, daemon=True).start()
     print("正在启动 MedDRA Browser 本地服务。使用时请保持这个终端窗口打开；不用时可关闭窗口停止服务。", flush=True)
-    uvicorn.run("app.main:app", host=HOST, port=PORT, log_level="info")
+    try:
+        uvicorn.run("app.main:app", host=HOST, port=PORT, log_level="info")
+    finally:
+        clear_active_port_sidecar()
     return 0
 
 

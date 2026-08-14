@@ -252,15 +252,25 @@
 
         // A file:// page can be denied every localhost probe by the browser.
         // The launcher writes this sidecar only after the service is ready, so
-        // it is a safe last-resort handoff for that specific origin.
-        if (window.location.protocol === "file:" && sidecarReady) {
+        // it is a safe last-resort handoff for that specific origin. If the
+        // sidecar port was actually probed and returned null, however, the
+        // sidecar is stale (for example after a forced process kill); following
+        // it would strand the user on a browser connection-error page.
+        const sidecarProbedStale = sidecarReady && ports.includes(sidecar.port)
+          && candidates[ports.indexOf(sidecar.port)] === null;
+        if (window.location.protocol === "file:" && sidecarReady && !sidecarProbedStale) {
           setStatus("浏览器限制了本机探测，正在使用第一步写入的服务地址 " + sidecar.url + " ...");
           window.location.href = sidecar.url;
           return;
         }
 
         attempts += 1;
-        const scanned = `${ports[0]}-${ports[ports.length - 1]}`;
+        const sortedPorts = [...ports].sort((a, b) => a - b);
+        const rangeStart = sortedPorts[0];
+        const rangeEnd = sortedPorts[sortedPorts.length - 1];
+        const scanned = rangeStart === rangeEnd
+          ? `${rangeStart}`
+          : `${rangeStart}-${rangeEnd}（共 ${ports.length} 个）`;
         if (attempts >= MAX_AUTOMATIC_ATTEMPTS) {
           setStatus(
             `暂时没有检测到便携版服务（已检测端口 ${scanned}）。请先启动对应系统的“第一步”文件，` +
