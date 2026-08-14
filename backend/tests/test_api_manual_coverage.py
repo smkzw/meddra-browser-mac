@@ -55,6 +55,21 @@ class ApiManualCoverageTests(unittest.TestCase):
         self.assertTrue(candidate["app_store_mode"])
         self.assertEqual(candidate["distribution_mode"], "app_store_candidate")
 
+    def test_runtime_info_supports_file_entry_jsonp_probe(self) -> None:
+        with patch.dict(
+            os.environ,
+            {"MEDDRA_APP_STORE_MODE": "0", "MEDDRA_DISTRIBUTION_MODE": "portable"},
+            clear=False,
+        ):
+            response = self.client.get("/api/runtime-info", params={"callback": "__meddraProbe1"})
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("application/javascript", response.headers["content-type"])
+        self.assertTrue(response.text.startswith("__meddraProbe1("))
+        self.assertIn('"distribution_mode":"portable"', response.text)
+
+        invalid = self.client.get("/api/runtime-info", params={"callback": "alert(1)"})
+        self.assertEqual(invalid.status_code, 400)
+
     def test_search_categories_code_and_soc_filter(self) -> None:
         exact = self.client.post(
             "/api/search",

@@ -73,7 +73,10 @@ def is_ready() -> bool:
 def open_entry() -> None:
     if os.environ.get("MEDDRA_BROWSER_OPEN", "1") == "0":
         return
-    if PORT != REQUESTED_PORT:
+    # Open the served page instead of the file:// helper whenever the bundle
+    # contains the built frontend. This avoids browser file-origin restrictions
+    # and makes the normal first-step double-click flow independent of CORS.
+    if (ROOT / "frontend" / "dist" / "index.html").exists():
         webbrowser.open(BASE_URL)
         return
     entry = HTML_ENTRY if HTML_ENTRY.exists() else FALLBACK_HTML_ENTRY

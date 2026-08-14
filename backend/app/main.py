@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 from functools import lru_cache
+import json
 import os
 from pathlib import Path
+import re
 import sqlite3
 import subprocess
 import sys
@@ -30,7 +32,7 @@ from .meddra_data import (
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 FRONTEND_DIST = PROJECT_ROOT / "frontend" / "dist"
 
-app = FastAPI(title="MedDRA Browser", version="0.1.11")
+app = FastAPI(title="MedDRA Browser", version="0.1.12")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:5173", "http://127.0.0.1:5173", "null"],
@@ -317,18 +319,30 @@ def api_status(version: Optional[str] = Query(default=None)) -> dict[str, Any]:
     return require_ready_store(version).status()
 
 
+_RUNTIME_CALLBACK_RE = re.compile(r"^[A-Za-z_$][A-Za-z0-9_$]*$")
+
+
 @app.get("/api/runtime-info")
-def api_runtime_info() -> dict[str, Any]:
+def api_runtime_info(callback: Optional[str] = Query(default=None)) -> Any:
     app_store_mode = os.environ.get("MEDDRA_APP_STORE_MODE") == "1"
     distribution_mode = os.environ.get("MEDDRA_DISTRIBUTION_MODE", "local")
     if app_store_mode:
         distribution_mode = "app_store_candidate"
-    return {
+    payload = {
         "app_name": "MedDRA Browser",
         "version": app.version,
         "app_store_mode": app_store_mode,
         "distribution_mode": distribution_mode,
     }
+    if callback is not None:
+        if not _RUNTIME_CALLBACK_RE.fullmatch(callback):
+            raise HTTPException(status_code=400, detail="无效的运行状态回调名称")
+        return Response(
+            content=f"{callback}({json.dumps(payload, ensure_ascii=False, separators=(',', ':'))});",
+            media_type="application/javascript",
+            headers={"Cache-Control": "no-store"},
+        )
+    return payload
 
 
 @app.get("/api/index-status")
