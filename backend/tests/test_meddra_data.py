@@ -71,6 +71,22 @@ class MeddraDataTests(unittest.TestCase):
             self.assertEqual(release.available_languages, ("en",))
             self.assertEqual(release.missing_languages, ("zh",))
 
+    def test_synonym_lookup_stays_inside_selected_root(self) -> None:
+        with TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            selected_root = workspace / "chosen-dictionary"
+            ascii_root = selected_root / "MedDRA_30_1_Chinese" / "ascii-301"
+            ascii_root.mkdir(parents=True)
+            for file_name in REQUIRED_ASC_FILES:
+                (ascii_root / file_name).write_text("", encoding="utf-8")
+            outside_mdb4 = workspace / "MDB4"
+            outside_mdb4.mkdir()
+            (outside_mdb4 / "meddra_synonym_english.asc").write_text("bleed$bleed$1\n", encoding="utf-8")
+
+            config = default_source_config("30.1", root=selected_root)
+
+            self.assertNotEqual(config.synonym_english.parent, outside_mdb4)
+
     def test_source_counts_match_local_29_0_distribution(self) -> None:
         status = self.store.status()
         self.assertEqual(status["version"], "29.0")

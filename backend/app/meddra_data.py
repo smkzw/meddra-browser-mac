@@ -251,7 +251,11 @@ def default_synonym_root(med_root: Path, release: ReleaseInfo | None = None) -> 
     for item in [release.english_dir if release else None, release.chinese_dir if release else None, med_root]:
         if item is None:
             continue
-        for base in [item, item.parent, item.parent.parent]:
+        # A user-selected release directory is the macOS security-scoped
+        # boundary. Do not walk to its grandparent looking for optional MDB4
+        # files; that can cross into an ungranted sibling directory and make
+        # an otherwise valid index fail with Operation not permitted.
+        for base in [item, item.parent]:
             if base not in bases:
                 bases.append(base)
     bases.extend([project_root / "dictionaries", default_med_root()])
@@ -696,8 +700,13 @@ class MeddraIndexer:
                 total += counts.get((lang, "smq_content.asc"), 0)
             total += counts.get((lang, "intl_ord.asc"), 0)
         for lang, path in [("en", self.config.synonym_english), ("zh", self.config.synonym_chinese)]:
-            if path.exists():
-                total += len(read_asc(path))
+            try:
+                if path.exists():
+                    total += len(read_asc(path))
+            except OSError:
+                # Synonym files are optional. A macOS security-scoped folder
+                # may make a sibling file visible but not readable.
+                continue
         return total
 
     def _source_signature(self) -> str:
@@ -1181,7 +1190,11 @@ class MeddraIndexer:
         for lang, path in [("en", self.config.synonym_english), ("zh", self.config.synonym_chinese)]:
             if not path.exists():
                 continue
-            rows = read_asc(path)
+            try:
+                rows = read_asc(path)
+            except OSError:
+                self._report_progress("synonyms", f"{lang} 同义词表不可访问，已跳过（不影响主词典索引）")
+                continue
             def synonym_rows() -> Iterable[tuple[Any, ...]]:
                 for parts in rows:
                     if len(parts) < 2:
