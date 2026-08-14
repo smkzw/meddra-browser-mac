@@ -287,6 +287,18 @@ function isMissingDictionaryMessage(message: string) {
   return message.includes("未发现可用的MedDRA") || message.includes("加入词典来源") || message.includes("还没有发现可用词典");
 }
 
+function isAppStoreCandidateMessage(message: string) {
+  return message.includes("App Store沙盒候选模式") || message.includes("安全作用域书签");
+}
+
+function sourceImportErrorMessage(error: unknown, fallback: string) {
+  const message = (error as Error)?.message || "";
+  if (isAppStoreCandidateMessage(message)) {
+    return "当前是App Store候选版，暂不支持导入外部词典；请改用普通版MedDRA Browser Mac.app。正式沙盒版需要原生文件夹选择器和安全作用域书签。";
+  }
+  return message || fallback;
+}
+
 function isIndexWaitingMessage(message: string) {
   return (
     message.includes("index_not_ready") ||
@@ -865,7 +877,7 @@ export default function App() {
       setSourcePath("");
       flash("已绑定词典文件夹，正在建立本地索引");
     } catch (error) {
-      flash((error as Error).message || "无法打开文件夹选择器");
+      flash(sourceImportErrorMessage(error, "无法打开文件夹选择器"));
     } finally {
       setImportingSource(false);
     }
@@ -887,7 +899,7 @@ export default function App() {
       setSourcePath("");
       flash("已绑定词典文件夹，正在建立本地索引");
     } catch (error) {
-      flash((error as Error).message || "导入目录失败");
+      flash(sourceImportErrorMessage(error, "导入目录失败"));
     } finally {
       setImportingSource(false);
     }
@@ -974,7 +986,7 @@ export default function App() {
         <div className="brand">
           <img src="/brand/app-icon-256.png" alt="" aria-hidden="true" />
           <div>
-            <h1>MedDRA Browser Mac</h1>
+            <h1>MedDRA Browser</h1>
             <span>本地词典浏览 · 中文界面 · MedDRA {version || status?.version || "自动选择"}</span>
           </div>
         </div>

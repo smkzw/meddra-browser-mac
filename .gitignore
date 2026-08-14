@@ -1,6 +1,8 @@
 backend/data/*.sqlite
 backend/data/*.sqlite-shm
 backend/data/*.sqlite-wal
+backend/data/.*.lock
+backend/data/.*.tmp*
 backend/data/source_roots.json
 backend/__pycache__/
 backend/app/__pycache__/

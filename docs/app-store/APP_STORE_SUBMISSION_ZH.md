@@ -85,7 +85,7 @@ build/app-store/
 ```bash
 APP_STORE_APPLE_ID=your-apple-id@example.com \
 APP_STORE_APP_SPECIFIC_PASSWORD=xxxx-xxxx-xxxx-xxxx \
-./scripts/upload_app_store_pkg.sh build/app-store/MedDRA\ Browser-0.1.9-10.pkg
+./scripts/upload_app_store_pkg.sh build/app-store/MedDRA\ Browser-版本号-构建号.pkg
 ```
 
 不要把 Apple ID 密码写入脚本或仓库。这里使用的是 app-specific password。

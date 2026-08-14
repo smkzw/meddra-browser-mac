@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
@@ -87,6 +88,26 @@ class MeddraDataTests(unittest.TestCase):
         processed_values = [int(row.get("processed_rows") or 0) for row in row_events]
         self.assertEqual(processed_values, sorted(processed_values))
         self.assertGreaterEqual(int(row_events[-1].get("processed_rows") or 0), int(row_events[-1].get("total_rows") or 0))
+
+    def test_failed_rebuild_keeps_valid_index_and_cleans_orphan_files(self) -> None:
+        with TemporaryDirectory() as tmp:
+            config = replace(self.config, db_path=Path(tmp) / "meddra_test.sqlite")
+            MeddraIndexer(config).ensure_index(force=True)
+            orphan = Path(tmp) / ".meddra_test.sqlite.previous.tmp"
+            orphan_journal = Path(f"{orphan}-journal")
+            orphan.touch()
+            orphan_journal.touch()
+
+            failing = MeddraIndexer(config)
+            with patch.object(failing, "_load_language", side_effect=RuntimeError("synthetic build failure")):
+                with self.assertRaisesRegex(RuntimeError, "synthetic build failure"):
+                    failing.ensure_index(force=True)
+
+            self.assertTrue(config.db_path.exists())
+            self.assertTrue(failing.is_current())
+            self.assertFalse(orphan.exists())
+            self.assertFalse(orphan_journal.exists())
+            self.assertFalse(list(Path(tmp).glob(".meddra_test.sqlite.*.tmp*")))
 
     def test_golden_terms_have_bilingual_names_and_hierarchy(self) -> None:
         rhabdo = self.store.details("PT", "10039020")

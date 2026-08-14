@@ -30,7 +30,7 @@ from .meddra_data import (
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 FRONTEND_DIST = PROJECT_ROOT / "frontend" / "dist"
 
-app = FastAPI(title="MedDRA Browser Mac", version="0.1.9")
+app = FastAPI(title="MedDRA Browser", version="0.1.10")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:5173", "http://127.0.0.1:5173", "null"],
@@ -315,6 +315,20 @@ def store(version: Optional[str] = None) -> MeddraStore:
 @app.get("/api/status")
 def api_status(version: Optional[str] = Query(default=None)) -> dict[str, Any]:
     return require_ready_store(version).status()
+
+
+@app.get("/api/runtime-info")
+def api_runtime_info() -> dict[str, Any]:
+    app_store_mode = os.environ.get("MEDDRA_APP_STORE_MODE") == "1"
+    distribution_mode = os.environ.get("MEDDRA_DISTRIBUTION_MODE", "local")
+    if app_store_mode:
+        distribution_mode = "app_store_candidate"
+    return {
+        "app_name": "MedDRA Browser",
+        "version": app.version,
+        "app_store_mode": app_store_mode,
+        "distribution_mode": distribution_mode,
+    }
 
 
 @app.get("/api/index-status")

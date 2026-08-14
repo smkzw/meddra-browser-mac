@@ -40,6 +40,21 @@ class ApiManualCoverageTests(unittest.TestCase):
         self.assertIn("PT", status["search_levels"])
         self.assertIn("SMQ", status["search_levels"])
 
+    def test_runtime_info_distinguishes_portable_and_app_store_modes(self) -> None:
+        with patch.dict(
+            os.environ,
+            {"MEDDRA_APP_STORE_MODE": "0", "MEDDRA_DISTRIBUTION_MODE": "portable"},
+            clear=False,
+        ):
+            portable = self.client.get("/api/runtime-info").json()
+        self.assertFalse(portable["app_store_mode"])
+        self.assertEqual(portable["distribution_mode"], "portable")
+
+        with patch.dict(os.environ, {"MEDDRA_APP_STORE_MODE": "1"}, clear=False):
+            candidate = self.client.get("/api/runtime-info").json()
+        self.assertTrue(candidate["app_store_mode"])
+        self.assertEqual(candidate["distribution_mode"], "app_store_candidate")
+
     def test_search_categories_code_and_soc_filter(self) -> None:
         exact = self.client.post(
             "/api/search",

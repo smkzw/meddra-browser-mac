@@ -237,6 +237,11 @@ echo "[$(date '+%Y-%m-%d %H:%M:%S')] python=${PYTHON_CMD[*]} runtime=${RUNTIME_P
 
 export MEDDRA_BROWSER_STATE_DIR="${DATA_DIR}"
 export MEDDRA_APP_STORE_MODE="${APP_STORE_MODE}"
+if [ "${APP_STORE_MODE}" = "1" ]; then
+  export MEDDRA_DISTRIBUTION_MODE="app_store_candidate"
+else
+  export MEDDRA_DISTRIBUTION_MODE="free_mac"
+fi
 export PYTHONPATH="${VENDOR_DIR}:${APP_ROOT}/backend"
 
 if ! curl -fsS --max-time 1 "http://${HOST}:${PORT}/api/source-roots" >/dev/null 2>&1; then
@@ -366,6 +371,7 @@ echo "[$(date '+%Y-%m-%d %H:%M:%S')] app_store_candidate=1 runtime=${RUNTIME_PY}
 
 export MEDDRA_BROWSER_STATE_DIR="${DATA_DIR}"
 export MEDDRA_APP_STORE_MODE="1"
+export MEDDRA_DISTRIBUTION_MODE="app_store_candidate"
 export PYTHONPATH="${VENDOR_DIR}:${APP_ROOT}/backend"
 
 if ! curl -fsS --max-time 1 "http://${HOST}:${PORT}/api/source-roots" >/dev/null 2>&1; then

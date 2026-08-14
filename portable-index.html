@@ -89,14 +89,29 @@
 
       async function checkServer() {
         const status = document.getElementById("status");
+        const queryPort = new URLSearchParams(window.location.search).get("port");
+        const ports = Array.from({ length: 20 }, (_, index) => String(Number(queryPort || 8765) + index));
         try {
-          const response = await fetch("http://127.0.0.1:8765/api/source-roots", { cache: "no-store" });
-          if (response.ok) {
+          const candidates = await Promise.all(ports.map(async (port) => {
+            const base = `http://127.0.0.1:${port}`;
+            try {
+              const response = await fetch(`${base}/api/runtime-info`, { cache: "no-store" });
+              if (!response.ok) return null;
+              const info = await response.json();
+              return info && info.distribution_mode === "portable" && info.app_store_mode === false
+                ? { base, info }
+                : null;
+            } catch (error) {
+              return null;
+            }
+          }));
+          const portable = candidates.find(Boolean);
+          if (portable) {
             status.textContent = "本地服务已启动，正在打开浏览器界面...";
-            window.location.href = "http://127.0.0.1:8765/";
+            window.location.href = `${portable.base}/`;
             return;
           }
-          status.textContent = "本地服务暂时不可用。" + platformStepText();
+          status.textContent = "还没有检测到便携版服务；如果 8765 正在运行其他 MedDRA 应用，请先启动便携版第一步。";
           window.setTimeout(checkServer, 2000);
         } catch (error) {
           status.textContent = "还没有检测到本地服务。" + platformStepText();

@@ -4,15 +4,6 @@ set -eu
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 PACKAGE_ROOT="${ROOT_DIR}/build/portable/meddra-browser-portable"
 ZIP_PATH="${ROOT_DIR}/build/meddra-browser-portable.zip"
-APP_VERSION="$(python3 - "${ROOT_DIR}/frontend/package.json" <<'PY'
-import json
-import sys
-from pathlib import Path
-
-print(json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))["version"])
-PY
-)"
-WINDOWS_EMERGENCY_ZIP="${ROOT_DIR}/build/MedDRA-Browser-Windows-Emergency-v${APP_VERSION}.zip"
 WINDOWS_PYTHON_VERSION="${WINDOWS_PYTHON_VERSION:-3.13.14}"
 WINDOWS_PYTHON_TAG="${WINDOWS_PYTHON_TAG:-313}"
 WINDOWS_PYTHON_URL="${WINDOWS_PYTHON_URL:-https://www.python.org/ftp/python/${WINDOWS_PYTHON_VERSION}/python-${WINDOWS_PYTHON_VERSION}-amd64.exe}"
@@ -42,7 +33,7 @@ python3 -m pip download \
   --only-binary=:all: \
   -r backend/requirements.txt
 
-rm -rf "${PACKAGE_ROOT}" "${ZIP_PATH}" "${WINDOWS_EMERGENCY_ZIP}"
+rm -rf "${PACKAGE_ROOT}" "${ZIP_PATH}"
 mkdir -p \
   "${PACKAGE_ROOT}/backend" \
   "${PACKAGE_ROOT}/frontend" \
@@ -124,6 +115,4 @@ PY
 }
 
 make_zip "${ZIP_PATH}"
-make_zip "${WINDOWS_EMERGENCY_ZIP}"
 echo "${ZIP_PATH}"
-echo "${WINDOWS_EMERGENCY_ZIP}"

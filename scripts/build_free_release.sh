@@ -25,7 +25,7 @@ cp "${MAC_ZIP}" "${MAC_VERSION_ZIP}"
 
 "${ROOT_DIR}/scripts/build_portable_package.sh"
 
-python3 - "${APP_PATH}" "${MAC_ZIP}" "${MAC_VERSION_ZIP}" "${ROOT_DIR}/build/meddra-browser-portable.zip" "${ROOT_DIR}/build/MedDRA-Browser-Windows-Emergency-v${APP_VERSION}.zip" <<'PY'
+python3 - "${APP_PATH}" "${MAC_ZIP}" "${MAC_VERSION_ZIP}" "${ROOT_DIR}/build/meddra-browser-portable.zip" <<'PY'
 from __future__ import annotations
 
 import sys
@@ -114,7 +114,6 @@ echo "无 Apple Developer Program 的分发包已生成："
 echo "- ${MAC_ZIP}"
 echo "- ${MAC_VERSION_ZIP}"
 echo "- ${ROOT_DIR}/build/meddra-browser-portable.zip"
-echo "- ${ROOT_DIR}/build/MedDRA-Browser-Windows-Emergency-v${APP_VERSION}.zip"
 echo
 echo "这些包未经过 Apple Developer ID 签名/公证，也不能上传 Mac App Store。"
 echo "Mac 用户首次打开时可能需要右键 App 选择“打开”。"

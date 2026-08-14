@@ -8,11 +8,12 @@
 
 ## 我该下载哪个文件
 
-在 GitHub Release 里有两个压缩包：
+在 GitHub Release 里提供两个压缩包：
 
 - `meddra-browser-mac-app.zip`：Mac 用户优先用这个。
 - `meddra-browser-portable.zip`：Windows 和 Mac 都能用。适合不想安装 App，或想放在 U 盘、移动硬盘里用。
-- `MedDRA-Browser-Windows-Emergency-v0.1.9.zip`：Windows 同事临时应急优先用这个。它和便携版功能一致，文件名更直观，并且包内带 Windows 运行环境。
+
+Windows 完整版就是 `meddra-browser-portable.zip`，包内已经带 Windows x64 Python 运行环境和离线依赖，不再单独维护功能重复的第二个 Windows 包。
 
 如果暂时没有 Apple Developer Program，不影响使用上面这些包。它们不能上架 Mac App Store，也没有 Apple 公证；Mac 首次打开时可能需要右键选择“打开”。详细说明见 `docs/no-apple-developer-program-distribution-zh.md`。
 
@@ -51,6 +52,8 @@ Mac：
 4. 进入页面后，点“设置”里的“选择词典文件夹”，选择你的 MedDRA 文件夹。
 
 便携版打开后会在浏览器里运行。使用时不要急着关闭第一步打开的命令窗口；不用了再关。
+
+便携版不会使用 App Store 沙盒模式。如果电脑上已经打开了 App Store 候选版或旧版 MedDRA 服务，便携启动器会识别到错误服务并自动改用其他本地端口，不会复用它。
 
 ## 选择哪个词典文件夹
 
