@@ -6,7 +6,6 @@
 
 1. Mac 用户下载 `meddra-browser-mac-app.zip`。
 2. Windows 和 Mac 都可以下载 `meddra-browser-portable.zip`。
-3. Windows 同事如果只是应急使用，下载 `MedDRA-Browser-Windows-Emergency-v0.1.9.zip` 这一类版本号包。
 
 这些包都不包含 MedDRA 词典数据。使用者第一次打开后，在“设置”里选择自己有授权的 MedDRA ASCII 词典文件夹即可。
 
@@ -41,7 +40,6 @@
 meddra-browser-mac-app.zip
 MedDRA-Browser-Mac-v版本号.zip
 meddra-browser-portable.zip
-MedDRA-Browser-Windows-Emergency-v版本号.zip
 ```
 
 发布前建议至少检查：
@@ -65,9 +63,9 @@ Mac：
 
 Windows：
 
-1. 解压 `meddra-browser-portable.zip` 或 `MedDRA-Browser-Windows-Emergency-v版本号.zip`。
+1. 解压 `meddra-browser-portable.zip`。
 2. 双击 `【Windows】第一步：请双击我运行.bat`。
-3. 等页面自动打开。如果没自动打开，再双击 `第二步：双击我开始MedDRA浏览.html`。
+3. 等本地浏览器页面自动打开。如果没自动打开，再双击 `第二步：双击我开始MedDRA浏览.html`；入口会自动探测服务实际使用的端口。
 4. 进入后点“设置”里的“选择词典文件夹”。
 5. 选择自己的 MedDRA 文件夹。
 

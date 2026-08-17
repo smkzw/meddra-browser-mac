@@ -212,7 +212,10 @@ function displayName(item: { en_name?: string; zh_name?: string }, mode: Mode) {
 }
 
 function downloadText(filename: string, text: string, mime = "text/plain;charset=utf-8") {
-  const blob = new Blob([text], { type: mime });
+  // Excel on Chinese Windows assumes the system codepage (GBK) unless a UTF-8 BOM is present,
+  // which would garble Chinese MedDRA terms. JSON must stay BOM-free so JSON.parse works.
+  const needsBom = mime.includes("text/csv") && !text.startsWith("\ufeff");
+  const blob = new Blob([needsBom ? `\ufeff${text}` : text], { type: mime });
   const url = URL.createObjectURL(blob);
   const link = document.createElement("a");
   link.href = url;
@@ -285,6 +288,18 @@ function apiErrorMessage(data: unknown, fallback: string) {
 
 function isMissingDictionaryMessage(message: string) {
   return message.includes("未发现可用的MedDRA") || message.includes("加入词典来源") || message.includes("还没有发现可用词典");
+}
+
+function isAppStoreCandidateMessage(message: string) {
+  return message.includes("App Store沙盒候选模式") || message.includes("安全作用域书签");
+}
+
+function sourceImportErrorMessage(error: unknown, fallback: string) {
+  const message = (error as Error)?.message || "";
+  if (isAppStoreCandidateMessage(message)) {
+    return "当前是 App Store 候选版，暂不支持从这里导入外部词典。请改用便携版或普通桌面版 MedDRA Browser。正式沙盒版需要原生文件夹选择器。";
+  }
+  return message || fallback;
 }
 
 function isIndexWaitingMessage(message: string) {
@@ -865,7 +880,7 @@ export default function App() {
       setSourcePath("");
       flash("已绑定词典文件夹，正在建立本地索引");
     } catch (error) {
-      flash((error as Error).message || "无法打开文件夹选择器");
+      flash(sourceImportErrorMessage(error, "无法打开文件夹选择器"));
     } finally {
       setImportingSource(false);
     }
@@ -887,7 +902,7 @@ export default function App() {
       setSourcePath("");
       flash("已绑定词典文件夹，正在建立本地索引");
     } catch (error) {
-      flash((error as Error).message || "导入目录失败");
+      flash(sourceImportErrorMessage(error, "导入目录失败"));
     } finally {
       setImportingSource(false);
     }
@@ -974,7 +989,7 @@ export default function App() {
         <div className="brand">
           <img src="/brand/app-icon-256.png" alt="" aria-hidden="true" />
           <div>
-            <h1>MedDRA Browser Mac</h1>
+            <h1>MedDRA Browser</h1>
             <span>本地词典浏览 · 中文界面 · MedDRA {version || status?.version || "自动选择"}</span>
           </div>
         </div>

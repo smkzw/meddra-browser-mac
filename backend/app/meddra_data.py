@@ -1,11 +1,15 @@
 from __future__ import annotations
 
 import csv
+from contextlib import contextmanager
 import io
 import json
 import os
 import re
+import shutil
 import sqlite3
+import sys
+import time
 import unicodedata
 from dataclasses import dataclass
 from difflib import SequenceMatcher
@@ -13,6 +17,11 @@ from functools import lru_cache
 from hashlib import sha1
 from pathlib import Path
 from typing import Any, Callable, Iterable
+
+if os.name == "nt":
+    import msvcrt
+else:
+    import fcntl
 
 
 LEVELS = ["SOC", "HLGT", "HLT", "PT", "LLT"]
@@ -52,7 +61,8 @@ SEARCH_LABELS = {
     "smq": "SMQ匹配",
 }
 
-SCOPE_LABELS = {"1": "广义", "2": "狭义"}
+SCOPE_LABELS = {"0": "子级SMQ", "1": "广义", "2": "狭义"}
+SMQ_CONTENT_LEVEL_LABELS = {"0": "SMQ", "4": "PT", "5": "LLT"}
 PROGRESS_FILES = [
     "soc.asc",
     "hlgt.asc",
@@ -66,6 +76,10 @@ PROGRESS_FILES = [
     "smq_list.asc",
 ]
 ProgressCallback = Callable[[dict[str, Any]], None]
+PROGRESS_BATCH_SIZE = 5_000
+INDEX_BUILD_LOCK_TIMEOUT_SECONDS = 3.0
+MIN_INDEX_FREE_SPACE_BYTES = 512 * 1024 * 1024
+MIN_INDEX_TEMP_LIMIT_BYTES = 512 * 1024 * 1024
 
 
 @dataclass(frozen=True)
@@ -122,6 +136,42 @@ class SourceConfig:
     available_versions: tuple[ReleaseInfo, ...] = ()
 
 
+@contextmanager
+def index_build_lock(lock_path: Path, timeout: float = INDEX_BUILD_LOCK_TIMEOUT_SECONDS):
+    """Serialize index builds across threads and separate app processes."""
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with lock_path.open("a+", encoding="ascii") as handle:
+        if os.name == "nt":
+            handle.seek(0, os.SEEK_END)
+            if handle.tell() == 0:
+                handle.write("0")
+                handle.flush()
+        deadline = time.monotonic() + timeout
+        while True:
+            try:
+                handle.seek(0)
+                if os.name == "nt":
+                    msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+                else:
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except (BlockingIOError, OSError) as exc:
+                if time.monotonic() >= deadline:
+                    raise RuntimeError("另一个MedDRA索引任务正在运行，请等待当前任务结束") from exc
+                time.sleep(0.1)
+        try:
+            yield
+        finally:
+            try:
+                handle.seek(0)
+                if os.name == "nt":
+                    msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+                else:
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+            except OSError:
+                pass
+
+
 def default_source_config(version: str | None = None, root: Path | None = None) -> SourceConfig:
     med_root = root.expanduser() if root else default_med_root()
     releases = discover_releases(med_root if root else None)
@@ -150,7 +200,20 @@ def default_med_root() -> Path:
     roots = explicit_source_roots()
     if roots:
         return roots[0]
+    app_support_root = mac_app_support_dictionary_root()
+    if app_support_root is not None:
+        return app_support_root
     return Path(__file__).resolve().parents[2] / "dictionaries"
+
+
+def mac_app_support_dictionary_root() -> Path | None:
+    # The free macOS app owns this directory and can read it after Finder
+    # launch even when a previously selected Documents path is no longer
+    # available to the process. Portable and Windows runs must stay isolated
+    # from the host's app-support data.
+    if sys.platform != "darwin" or os.environ.get("MEDDRA_DISTRIBUTION_MODE") != "free_mac":
+        return None
+    return Path.home() / "Library" / "Application Support" / "MedDRA Browser Mac" / "dictionaries"
 
 
 def explicit_source_roots() -> list[Path]:
@@ -161,6 +224,9 @@ def explicit_source_roots() -> list[Path]:
             if raw.strip():
                 roots.append(Path(raw.strip()).expanduser())
     roots.extend(load_source_roots())
+    app_support_root = mac_app_support_dictionary_root()
+    if app_support_root is not None:
+        roots.append(app_support_root)
     unique: list[Path] = []
     for item in roots:
         if item not in unique:
@@ -168,12 +234,37 @@ def explicit_source_roots() -> list[Path]:
     return unique
 
 
+SKIP_DIRECTORY_NAMES = {
+    ".git",
+    ".hg",
+    ".svn",
+    ".venv",
+    ".venv_macos",
+    ".venv_windows",
+    ".python_windows",
+    ".qa-extract",
+    ".qa-state",
+    ".playwright-cli",
+    "node_modules",
+    "__pycache__",
+    "wheelhouse",
+    "qa-worktrees",
+    "meddra-browser-mac",
+}
+MAX_DICTIONARY_WALK_DEPTH = 6
+MAX_DICTIONARY_WALK_DIRS = 4000
+
+
+def should_skip_directory(name: str) -> bool:
+    return name in SKIP_DIRECTORY_NAMES or name.startswith(".")
+
+
 def contains_meddra_ascii(root: Path) -> bool:
     if not root.exists() or not root.is_dir():
         return False
     try:
-        next(root.rglob("soc.asc"))
-    except (StopIteration, OSError):
+        next(iter_dictionary_dirs(root))
+    except StopIteration:
         return False
     return True
 
@@ -203,7 +294,11 @@ def default_synonym_root(med_root: Path, release: ReleaseInfo | None = None) -> 
     for item in [release.english_dir if release else None, release.chinese_dir if release else None, med_root]:
         if item is None:
             continue
-        for base in [item, item.parent, item.parent.parent]:
+        # A user-selected release directory is the macOS security-scoped
+        # boundary. Do not walk to its grandparent looking for optional MDB4
+        # files; that can cross into an ungranted sibling directory and make
+        # an otherwise valid index fail with Operation not permitted.
+        for base in [item, item.parent]:
             if base not in bases:
                 bases.append(base)
     bases.extend([project_root / "dictionaries", default_med_root()])
@@ -321,12 +416,29 @@ def iter_dictionary_dirs(root: Path) -> Iterable[Path]:
     if (root / "soc.asc").exists():
         yield root
         return
-    try:
-        soc_files = root.rglob("soc.asc")
-        for soc_file in soc_files:
-            yield soc_file.parent
-    except (OSError, PermissionError):
-        return
+    stack: list[tuple[Path, int]] = [(root, 0)]
+    seen = 0
+    while stack:
+        current, depth = stack.pop()
+        seen += 1
+        if seen > MAX_DICTIONARY_WALK_DIRS or depth > MAX_DICTIONARY_WALK_DEPTH:
+            continue
+        try:
+            if (current / "soc.asc").exists():
+                yield current
+                continue
+            children = list(current.iterdir())
+        except (OSError, PermissionError):
+            continue
+        if depth >= MAX_DICTIONARY_WALK_DEPTH:
+            continue
+        for child in children:
+            try:
+                if not child.is_dir() or should_skip_directory(child.name):
+                    continue
+            except (OSError, PermissionError):
+                continue
+            stack.append((child, depth + 1))
 
 
 def select_release(releases: list[ReleaseInfo], version: str | None = None) -> ReleaseInfo:
@@ -474,50 +586,65 @@ class MeddraIndexer:
         self.progress_callback = progress_callback
         self._progress_total_rows = 0
         self._progress_processed_rows = 0
+        self._active_temp_path: Path | None = None
+        self._build_size_limit = 0
 
     def ensure_index(self, *, force: bool = False) -> None:
-        if self.config.db_path.exists():
-            if force or not self._index_is_current():
-                pass
-            else:
+        self.config.db_path.parent.mkdir(parents=True, exist_ok=True)
+        lock_path = self.config.db_path.with_name(f".{self.config.db_path.name}.lock")
+        with index_build_lock(lock_path):
+            self._cleanup_orphaned_temp_indexes()
+            if self.config.db_path.exists() and not force and self._index_is_current():
                 self._report_progress("ready", "索引已可用", percent=100)
                 return
-        language_dirs = self._language_dirs()
-        if not language_dirs:
-            raise RuntimeError("未配置可用的英文或中文MedDRA ASCII目录")
-        self.config.db_path.parent.mkdir(parents=True, exist_ok=True)
-        progress_counts = self._progress_row_counts(language_dirs)
-        self._progress_total_rows = max(1, self._progress_total_from_counts(progress_counts, language_dirs))
-        self._progress_processed_rows = 0
-        self._report_progress("preparing", "准备创建本地索引", percent=0)
+            language_dirs = self._language_dirs()
+            if not language_dirs:
+                raise RuntimeError("未配置可用的英文或中文MedDRA ASCII目录")
+            progress_counts = self._progress_row_counts(language_dirs)
+            self._progress_total_rows = max(1, self._progress_total_from_counts(progress_counts, language_dirs))
+            self._progress_processed_rows = 0
+            self._prepare_build_capacity(language_dirs)
+            self._report_progress("preparing", "准备创建本地索引", percent=0)
 
-        temp_path = self.config.db_path.with_name(f".{self.config.db_path.name}.{os.getpid()}.{id(self)}.tmp")
-        self._delete_index(temp_path)
-        try:
-            with sqlite3.connect(temp_path) as con:
-                con.row_factory = sqlite3.Row
-                self._create_schema(con)
-                for index, (lang, base) in enumerate(language_dirs):
-                    self._load_language(con, lang, base, load_smq_content=index == 0, row_counts=progress_counts)
-                self._report_progress("merging", "合并中英文术语与层级关系")
-                self._merge_terms(con)
-                self._report_progress("synonyms", "载入同义词表")
-                self._load_synonyms(con)
-                self._report_progress("fts", "构建全文搜索索引")
-                self._build_fts(con)
-                self._report_progress("metadata", "写入索引元数据")
-                self._write_metadata(con)
-                con.commit()
-            self._delete_index()
-            temp_path.replace(self.config.db_path)
-            self._report_progress("ready", "索引完成", percent=100)
-        finally:
+            temp_path = self.config.db_path.with_name(
+                f".{self.config.db_path.name}.{os.getpid()}.{id(self)}.tmp"
+            )
+            self._active_temp_path = temp_path
             self._delete_index(temp_path)
+            try:
+                con = sqlite3.connect(temp_path)
+                try:
+                    con.row_factory = sqlite3.Row
+                    self._create_schema(con)
+                    for index, (lang, base) in enumerate(language_dirs):
+                        self._load_language(con, lang, base, load_smq_content=index == 0, row_counts=progress_counts)
+                    self._report_progress("merging", "合并中英文术语与层级关系")
+                    self._merge_terms(con)
+                    self._report_progress("synonyms", "载入同义词表")
+                    self._load_synonyms(con)
+                    self._report_progress("fts", "构建全文搜索索引")
+                    self._build_fts(con)
+                    self._report_progress("metadata", "写入索引元数据")
+                    self._write_metadata(con)
+                    self._check_temp_size()
+                    con.commit()
+                finally:
+                    con.close()
+                # Keep the last valid index until the new scratch database is complete.
+                # os.replace is atomic on the same volume; on Windows a live reader can
+                # make it fail, in which case the old index is still intact.
+                os.replace(temp_path, self.config.db_path)
+                self._report_progress("ready", "索引完成", percent=100)
+            finally:
+                self._delete_index(temp_path)
+                self._active_temp_path = None
+                self._build_size_limit = 0
 
     def is_current(self) -> bool:
         return self.config.db_path.exists() and self._index_is_current()
 
     def _report_progress(self, phase: str, message: str, *, percent: int | None = None) -> None:
+        self._check_temp_size()
         if not self.progress_callback:
             return
         if percent is None:
@@ -535,6 +662,81 @@ class MeddraIndexer:
     def _advance_rows(self, phase: str, message: str, rows: int) -> None:
         self._progress_processed_rows = min(self._progress_total_rows, self._progress_processed_rows + max(0, rows))
         self._report_progress(phase, message)
+
+    def _executemany_progress(
+        self,
+        con: sqlite3.Connection,
+        sql: str,
+        rows: Iterable[tuple[Any, ...]],
+        phase: str,
+        message: str,
+    ) -> int:
+        batch: list[tuple[Any, ...]] = []
+        processed = 0
+        for row in rows:
+            batch.append(row)
+            if len(batch) < PROGRESS_BATCH_SIZE:
+                continue
+            con.executemany(sql, batch)
+            self._advance_rows(phase, message, len(batch))
+            processed += len(batch)
+            batch.clear()
+        if batch:
+            con.executemany(sql, batch)
+            self._advance_rows(phase, message, len(batch))
+            processed += len(batch)
+        return processed
+
+    def _prepare_build_capacity(self, language_dirs: list[tuple[str, Path]]) -> None:
+        source_bytes = 0
+        for _lang, base in language_dirs:
+            for file_name in [*REQUIRED_ASC_FILES, *OPTIONAL_ASC_FILES]:
+                path = base / file_name
+                try:
+                    source_bytes += path.stat().st_size
+                except OSError:
+                    continue
+        for path in [self.config.synonym_english, self.config.synonym_chinese]:
+            try:
+                source_bytes += path.stat().st_size
+            except OSError:
+                continue
+
+        # The current 29.x source is about 40 MB and produces a roughly 110 MB
+        # index. Keep enough headroom for SQLite pages and one failed attempt,
+        # while refusing an unbounded build on a nearly full Windows disk.
+        estimated_index = max(128 * 1024 * 1024, source_bytes * 4)
+        self._build_size_limit = max(MIN_INDEX_TEMP_LIMIT_BYTES, estimated_index * 4)
+        required_free = max(MIN_INDEX_FREE_SPACE_BYTES, estimated_index * 2)
+        free_bytes = shutil.disk_usage(self.config.db_path.parent).free
+        if free_bytes < required_free:
+            raise RuntimeError(
+                "磁盘可用空间不足，无法安全建立MedDRA本地索引；"
+                f"至少需要约 {required_free / 1024 / 1024:.0f} MB，当前仅剩 {free_bytes / 1024 / 1024:.0f} MB。"
+                "请先清理旧的MedDRA临时索引文件后重试。"
+            )
+
+    def _temp_storage_bytes(self) -> int:
+        if not self._active_temp_path:
+            return 0
+        total = 0
+        for path in self._index_sidecar_paths(self._active_temp_path):
+            try:
+                total += path.stat().st_size
+            except OSError:
+                continue
+        return total
+
+    def _check_temp_size(self) -> None:
+        if not self._active_temp_path or not self._build_size_limit:
+            return
+        size = self._temp_storage_bytes()
+        if size > self._build_size_limit:
+            raise RuntimeError(
+                "本地索引临时文件超过安全空间上限，已停止本次构建；"
+                f"当前约 {size / 1024 / 1024:.0f} MB，上限约 {self._build_size_limit / 1024 / 1024:.0f} MB。"
+                "请检查是否重复启动了多个索引任务。"
+            )
 
     def _progress_row_counts(self, language_dirs: list[tuple[str, Path]]) -> dict[tuple[str, str], int]:
         counts: dict[tuple[str, str], int] = {}
@@ -558,8 +760,13 @@ class MeddraIndexer:
                 total += counts.get((lang, "smq_content.asc"), 0)
             total += counts.get((lang, "intl_ord.asc"), 0)
         for lang, path in [("en", self.config.synonym_english), ("zh", self.config.synonym_chinese)]:
-            if path.exists():
-                total += len(read_asc(path))
+            try:
+                if path.exists():
+                    total += len(read_asc(path))
+            except OSError:
+                # Synonym files are optional. A macOS security-scoped folder
+                # may make a sibling file visible but not readable.
+                continue
         return total
 
     def _source_signature(self) -> str:
@@ -601,15 +808,25 @@ class MeddraIndexer:
 
     def _delete_index(self, db_path: Path | None = None) -> None:
         target = db_path or self.config.db_path
-        for path in [
-            target,
-            target.with_name(f"{target.name}-wal"),
-            target.with_name(f"{target.name}-shm"),
-        ]:
+        for path in self._index_sidecar_paths(target):
             try:
                 path.unlink()
             except FileNotFoundError:
                 continue
+
+    def _index_sidecar_paths(self, target: Path) -> list[Path]:
+        return [
+            target,
+            target.with_name(f"{target.name}-wal"),
+            target.with_name(f"{target.name}-shm"),
+            target.with_name(f"{target.name}-journal"),
+        ]
+
+    def _cleanup_orphaned_temp_indexes(self) -> None:
+        prefix = f".{self.config.db_path.name}."
+        for path in self.config.db_path.parent.glob(f"{prefix}*.tmp*"):
+            if path.is_file():
+                self._delete_index(path)
 
     def _language_dirs(self) -> list[tuple[str, Path]]:
         rows: list[tuple[str, Path]] = []
@@ -622,7 +839,11 @@ class MeddraIndexer:
     def _create_schema(self, con: sqlite3.Connection) -> None:
         con.executescript(
             """
-            pragma journal_mode = delete;
+            -- This is a disposable scratch database. The completed file is
+            -- committed and atomically replaced into place below.
+            pragma journal_mode = memory;
+            pragma synchronous = off;
+            pragma locking_mode = exclusive;
             drop table if exists source_counts;
             drop table if exists raw_terms;
             drop table if exists terms;
@@ -802,51 +1023,56 @@ class MeddraIndexer:
 
     def _load_terms(self, con: sqlite3.Connection, lang: str, base: Path) -> None:
         rows = read_asc(base / "soc.asc")
-        for parts in rows:
-            con.execute(
-                "insert into raw_terms values (?, 'SOC', ?, ?, null, null, ?)",
-                (lang, parts[0], parts[1], parts[2] if len(parts) > 2 else ""),
-            )
-        self._advance_rows("terms", f"读取 {lang} SOC", len(rows))
+        self._executemany_progress(
+            con,
+            "insert into raw_terms values (?, 'SOC', ?, ?, null, null, ?)",
+            ((lang, parts[0], parts[1], parts[2] if len(parts) > 2 else "") for parts in rows),
+            "terms",
+            f"读取 {lang} SOC",
+        )
         for filename, level in [("hlgt.asc", "HLGT"), ("hlt.asc", "HLT")]:
             rows = read_asc(base / filename)
-            for parts in rows:
-                con.execute(
-                    "insert into raw_terms values (?, ?, ?, ?, null, null, null)",
-                    (lang, level, parts[0], parts[1]),
-                )
-            self._advance_rows("terms", f"读取 {lang} {level}", len(rows))
-        rows = read_asc(base / "pt.asc")
-        for parts in rows:
-            con.execute(
-                "insert into raw_terms values (?, 'PT', ?, ?, null, 'Y', null)",
-                (lang, parts[0], parts[1]),
+            self._executemany_progress(
+                con,
+                "insert into raw_terms values (?, ?, ?, ?, null, null, null)",
+                ((lang, level, parts[0], parts[1]) for parts in rows),
+                "terms",
+                f"读取 {lang} {level}",
             )
-        self._advance_rows("terms", f"读取 {lang} PT", len(rows))
+        rows = read_asc(base / "pt.asc")
+        self._executemany_progress(
+            con,
+            "insert into raw_terms values (?, 'PT', ?, ?, null, 'Y', null)",
+            ((lang, parts[0], parts[1]) for parts in rows),
+            "terms",
+            f"读取 {lang} PT",
+        )
         rows = read_asc(base / "llt.asc")
-        for parts in rows:
-            con.execute(
-                "insert into raw_terms values (?, 'LLT', ?, ?, ?, ?, null)",
+        self._executemany_progress(
+            con,
+            "insert into raw_terms values (?, 'LLT', ?, ?, ?, ?, null)",
+            (
                 (
                     lang,
                     parts[0],
                     parts[1],
                     parts[2] if len(parts) > 2 else "",
                     parts[9] if len(parts) > 9 else "Y",
-                ),
-            )
-        self._advance_rows("terms", f"读取 {lang} LLT", len(rows))
+                )
+                for parts in rows
+            ),
+            "terms",
+            f"读取 {lang} LLT",
+        )
 
     def _load_hierarchy(self, con: sqlite3.Connection, lang: str, base: Path) -> None:
         rows = read_asc(base / "mdhier.asc")
-        for idx, parts in enumerate(rows):
-            if len(parts) < 12:
-                continue
-            occurrence_key = f"{lang}:{idx}:{parts[0]}:{parts[3]}"
-            con.execute(
-                """
-                insert into hierarchy values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
+        processed = self._executemany_progress(
+            con,
+            """
+            insert into hierarchy values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
                 (
                     lang,
                     parts[0],
@@ -859,10 +1085,15 @@ class MeddraIndexer:
                     parts[7],
                     parts[8],
                     parts[11] or "N",
-                    occurrence_key,
-                ),
-            )
-        self._advance_rows("hierarchy", f"读取 {lang} MDHIER", len(rows))
+                    f"{lang}:{idx}:{parts[0]}:{parts[3]}",
+                )
+                for idx, parts in enumerate(rows)
+                if len(parts) >= 12
+            ),
+            "hierarchy",
+            f"读取 {lang} MDHIER",
+        )
+        self._advance_rows("hierarchy", f"跳过 {lang} MDHIER无效记录", len(rows) - processed)
 
     def _load_relations(self, con: sqlite3.Connection, lang: str, base: Path) -> None:
         relation_files = [
@@ -872,69 +1103,69 @@ class MeddraIndexer:
         ]
         for filename, relation in relation_files:
             rows = read_asc(base / filename)
-            for parts in rows:
-                if len(parts) >= 2:
-                    con.execute(
-                        "insert or ignore into relations values (?, ?, ?, ?)",
-                        (lang, relation, parts[0], parts[1]),
-                    )
-            self._advance_rows("relations", f"读取 {lang} {relation}", len(rows))
+            processed = self._executemany_progress(
+                con,
+                "insert or ignore into relations values (?, ?, ?, ?)",
+                ((lang, relation, parts[0], parts[1]) for parts in rows if len(parts) >= 2),
+                "relations",
+                f"读取 {lang} {relation}",
+            )
+            self._advance_rows("relations", f"跳过 {lang} {relation}无效记录", len(rows) - processed)
         rows = read_asc(base / "llt.asc")
-        for parts in rows:
-            if len(parts) >= 3:
-                con.execute(
-                    "insert or ignore into relations values (?, 'PT_LLT', ?, ?)",
-                    (lang, parts[2], parts[0]),
-                )
-        self._advance_rows("relations", f"建立 {lang} PT-LLT 关系", len(rows))
+        processed = self._executemany_progress(
+            con,
+            "insert or ignore into relations values (?, 'PT_LLT', ?, ?)",
+            ((lang, parts[2], parts[0]) for parts in rows if len(parts) >= 3),
+            "relations",
+            f"建立 {lang} PT-LLT 关系",
+        )
+        self._advance_rows("relations", f"跳过 {lang} PT-LLT无效记录", len(rows) - processed)
 
     def _load_soc_order(self, con: sqlite3.Connection, lang: str, base: Path) -> None:
         path = base / "intl_ord.asc"
         if not path.exists():
             return
         rows = read_asc(path)
-        for parts in rows:
-            if len(parts) < 2:
-                continue
-            try:
-                sort_order = int(parts[0])
-            except ValueError:
-                sort_order = 999
-            con.execute(
-                "insert or ignore into soc_order values (?, ?, ?)",
-                (lang, parts[1], sort_order),
-            )
-        self._advance_rows("soc_order", f"读取 {lang} SOC排序", len(rows))
+        def order_rows() -> Iterable[tuple[Any, ...]]:
+            for parts in rows:
+                if len(parts) < 2:
+                    continue
+                try:
+                    sort_order = int(parts[0])
+                except ValueError:
+                    sort_order = 999
+                yield (lang, parts[1], sort_order)
+
+        processed = self._executemany_progress(
+            con,
+            "insert or ignore into soc_order values (?, ?, ?)",
+            order_rows(),
+            "soc_order",
+            f"读取 {lang} SOC排序",
+        )
+        self._advance_rows("soc_order", f"跳过 {lang} SOC排序无效记录", len(rows) - processed)
 
     def _load_smq(self, con: sqlite3.Connection, lang: str, base: Path, *, load_smq_content: bool) -> None:
         rows = read_asc(base / "smq_list.asc")
-        for parts in rows:
-            padded = parts + [""] * 10
-            con.execute(
-                "insert into smq_list_raw values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (
-                    lang,
-                    padded[0],
-                    padded[1],
-                    padded[2],
-                    padded[3],
-                    padded[4],
-                    padded[5],
-                    padded[6],
-                    padded[7],
-                    padded[8],
-                ),
-            )
-        self._advance_rows("smq", f"读取 {lang} SMQ列表", len(rows))
+        self._executemany_progress(
+            con,
+            "insert into smq_list_raw values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                (lang, *(parts + [""] * 10)[:9])
+                for parts in rows
+            ),
+            "smq",
+            f"读取 {lang} SMQ列表",
+        )
         if load_smq_content:
             rows = read_asc(base / "smq_content.asc")
-            for parts in rows:
-                padded = parts + [""] * 10
-                con.execute(
-                    "insert or ignore into smq_content values (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                    tuple(padded[:9]),
-                )
-            self._advance_rows("smq", f"读取 {lang} SMQ内容", len(rows))
+            self._executemany_progress(
+                con,
+                "insert or ignore into smq_content values (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (tuple((parts + [""] * 10)[:9]) for parts in rows),
+                "smq",
+                f"读取 {lang} SMQ内容",
+            )
 
     def _merge_terms(self, con: sqlite3.Connection) -> None:
         con.execute(
@@ -1019,16 +1250,26 @@ class MeddraIndexer:
         for lang, path in [("en", self.config.synonym_english), ("zh", self.config.synonym_chinese)]:
             if not path.exists():
                 continue
-            rows = read_asc(path)
-            for parts in rows:
-                if len(parts) < 2:
-                    continue
-                weight = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else None
-                con.execute(
-                    "insert or ignore into synonyms values (?, ?, ?, ?)",
-                    (lang, parts[0].strip(), parts[1].strip(), weight),
-                )
-            self._advance_rows("synonyms", f"读取 {lang} 同义词表", len(rows))
+            try:
+                rows = read_asc(path)
+            except OSError:
+                self._report_progress("synonyms", f"{lang} 同义词表不可访问，已跳过（不影响主词典索引）")
+                continue
+            def synonym_rows() -> Iterable[tuple[Any, ...]]:
+                for parts in rows:
+                    if len(parts) < 2:
+                        continue
+                    weight = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else None
+                    yield (lang, parts[0].strip(), parts[1].strip(), weight)
+
+            processed = self._executemany_progress(
+                con,
+                "insert or ignore into synonyms values (?, ?, ?, ?)",
+                synonym_rows(),
+                "synonyms",
+                f"读取 {lang} 同义词表",
+            )
+            self._advance_rows("synonyms", f"跳过 {lang} 同义词无效记录", len(rows) - processed)
 
     def _build_fts(self, con: sqlite3.Connection) -> None:
         con.execute(
@@ -1361,12 +1602,17 @@ class MeddraStore:
                 return {"found": False, "smq_code": smq_code}
             content = con.execute(
                 """
-                select sc.*, t.en_name, t.zh_name, t.level
+                select sc.*,
+                    coalesce(t.en_name, cs.en_name) as en_name,
+                    coalesce(t.zh_name, cs.zh_name) as zh_name,
+                    coalesce(t.level, case when cs.smq_code is not null then 'SMQ' end) as level
                 from smq_content sc
                 left join terms t on t.code=sc.term_code and
                     t.level = case sc.term_level when '4' then 'PT' when '5' then 'LLT' else t.level end
+                left join smq cs on sc.term_level='0' and cs.smq_code=sc.term_code
                 where sc.smq_code=?
-                order by cast(sc.scope as integer) desc, coalesce(t.en_name, t.zh_name, sc.term_code)
+                order by cast(sc.scope as integer) desc,
+                    coalesce(t.en_name, cs.en_name, t.zh_name, cs.zh_name, sc.term_code)
                 """,
                 (smq_code,),
             ).fetchall()
@@ -1732,7 +1978,7 @@ class MeddraStore:
         return {
             "smq_code": row["smq_code"],
             "term_code": row["term_code"],
-            "term_level": {"4": "PT", "5": "LLT"}.get(row["term_level"], row["term_level"]),
+            "term_level": SMQ_CONTENT_LEVEL_LABELS.get(row["term_level"], row["term_level"]),
             "scope": row["scope"],
             "scope_label": SCOPE_LABELS.get(row["scope"], row["scope"]),
             "status": row["status"],
