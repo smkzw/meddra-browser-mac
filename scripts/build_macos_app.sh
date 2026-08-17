@@ -180,7 +180,9 @@ SERVER_LOG="${LOG_DIR}/server.log"
 PID_FILE="${SUPPORT_DIR}/server.pid"
 VENDOR_DIR="${APP_ROOT}/vendor"
 HOST="127.0.0.1"
-PORT="${MEDDRA_BROWSER_PORT:-8765}"
+REQUESTED_PORT="${MEDDRA_BROWSER_PORT:-8765}"
+PORT="${REQUESTED_PORT}"
+PORT_SCAN_LIMIT="${MEDDRA_BROWSER_PORT_SCAN_LIMIT:-20}"
 URL="http://${HOST}:${PORT}/"
 APP_STORE_MODE="__MEDDRA_APP_STORE_MODE__"
 
@@ -202,6 +204,51 @@ fail() {
     open "${SERVER_LOG}" >/dev/null 2>&1 || true
   fi
   exit 1
+}
+
+runtime_http_code() {
+  local candidate="$1"
+  local code
+  code="$(curl -sS --max-time 1 -o /dev/null -w "%{http_code}" "http://${HOST}:${candidate}/api/runtime-info" 2>/dev/null)" || code="000"
+  print -r -- "${code}"
+}
+
+runtime_payload() {
+  local candidate="$1"
+  curl -sS --max-time 1 "http://${HOST}:${candidate}/api/runtime-info" 2>/dev/null || true
+}
+
+matching_runtime() {
+  local payload="$1"
+  print -r -- "${payload}" | grep -Eq '"app_name"[[:space:]]*:[[:space:]]*"MedDRA Browser"' || return 1
+  if [ "${APP_STORE_MODE}" = "1" ]; then
+    print -r -- "${payload}" | grep -Eq '"app_store_mode"[[:space:]]*:[[:space:]]*true'
+  else
+    print -r -- "${payload}" | grep -Eq '"app_store_mode"[[:space:]]*:[[:space:]]*false'
+  fi
+}
+
+REUSE_EXISTING_SERVER=0
+select_port() {
+  local candidate code payload
+  for (( candidate = REQUESTED_PORT; candidate < REQUESTED_PORT + PORT_SCAN_LIMIT; candidate++ )); do
+    code="$(runtime_http_code "${candidate}")"
+    if [ "${code}" = "000" ]; then
+      PORT="${candidate}"
+      URL="http://${HOST}:${PORT}/"
+      return 0
+    fi
+    if [ "${code}" = "200" ]; then
+      payload="$(runtime_payload "${candidate}")"
+      if matching_runtime "${payload}"; then
+        PORT="${candidate}"
+        URL="http://${HOST}:${PORT}/"
+        REUSE_EXISTING_SERVER=1
+        return 0
+      fi
+    fi
+  done
+  fail "本地服务端口 ${REQUESTED_PORT}-$((REQUESTED_PORT + PORT_SCAN_LIMIT - 1)) 都已被占用，请关闭占用端口的程序后重试。"
 }
 
 if ! command -v python3 >/dev/null 2>&1; then
@@ -244,7 +291,12 @@ else
 fi
 export PYTHONPATH="${VENDOR_DIR}:${APP_ROOT}/backend"
 
-if ! curl -fsS --max-time 1 "http://${HOST}:${PORT}/api/source-roots" >/dev/null 2>&1; then
+select_port
+if [ "${PORT}" != "${REQUESTED_PORT}" ]; then
+  echo "[$(date '+%Y-%m-%d %H:%M:%S')] 默认端口 ${REQUESTED_PORT} 已被占用，改用 ${PORT}" >> "${SERVER_LOG}"
+fi
+
+if [ "${REUSE_EXISTING_SERVER}" != "1" ]; then
   notify "正在启动本地 MedDRA Browser 服务..."
   (
     cd "${APP_ROOT}"
@@ -254,13 +306,13 @@ if ! curl -fsS --max-time 1 "http://${HOST}:${PORT}/api/source-roots" >/dev/null
 fi
 
 for _ in {1..90}; do
-  if curl -fsS --max-time 1 "http://${HOST}:${PORT}/api/source-roots" >/dev/null 2>&1; then
+  if matching_runtime "$(runtime_payload "${PORT}")"; then
     break
   fi
   sleep 1
 done
 
-if ! curl -fsS --max-time 1 "http://${HOST}:${PORT}/api/source-roots" >/dev/null 2>&1; then
+if ! matching_runtime "$(runtime_payload "${PORT}")"; then
   fail "本地服务启动失败。日志会自动打开。"
 fi
 
@@ -327,8 +379,11 @@ SERVER_LOG="${LOG_DIR}/server.log"
 PID_FILE="${SUPPORT_DIR}/server.pid"
 VENDOR_DIR="${APP_ROOT}/vendor"
 HOST="127.0.0.1"
-PORT="${MEDDRA_BROWSER_PORT:-8765}"
+REQUESTED_PORT="${MEDDRA_BROWSER_PORT:-8765}"
+PORT="${REQUESTED_PORT}"
+PORT_SCAN_LIMIT="${MEDDRA_BROWSER_PORT_SCAN_LIMIT:-20}"
 URL="http://${HOST}:${PORT}/"
+APP_STORE_MODE="1"
 
 mkdir -p "${DATA_DIR}" "${LOG_DIR}"
 touch "${SERVER_LOG}"
@@ -336,6 +391,47 @@ touch "${SERVER_LOG}"
 fail() {
   echo "$1" >> "${SERVER_LOG}"
   exit 1
+}
+
+runtime_http_code() {
+  local candidate="$1"
+  local code
+  code="$(curl -sS --max-time 1 -o /dev/null -w "%{http_code}" "http://${HOST}:${candidate}/api/runtime-info" 2>/dev/null)" || code="000"
+  print -r -- "${code}"
+}
+
+runtime_payload() {
+  local candidate="$1"
+  curl -sS --max-time 1 "http://${HOST}:${candidate}/api/runtime-info" 2>/dev/null || true
+}
+
+matching_runtime() {
+  local payload="$1"
+  print -r -- "${payload}" | grep -Eq '"app_name"[[:space:]]*:[[:space:]]*"MedDRA Browser"' || return 1
+  print -r -- "${payload}" | grep -Eq '"app_store_mode"[[:space:]]*:[[:space:]]*true'
+}
+
+REUSE_EXISTING_SERVER=0
+select_port() {
+  local candidate code payload
+  for (( candidate = REQUESTED_PORT; candidate < REQUESTED_PORT + PORT_SCAN_LIMIT; candidate++ )); do
+    code="$(runtime_http_code "${candidate}")"
+    if [ "${code}" = "000" ]; then
+      PORT="${candidate}"
+      URL="http://${HOST}:${PORT}/"
+      return 0
+    fi
+    if [ "${code}" = "200" ]; then
+      payload="$(runtime_payload "${candidate}")"
+      if matching_runtime "${payload}"; then
+        PORT="${candidate}"
+        URL="http://${HOST}:${PORT}/"
+        REUSE_EXISTING_SERVER=1
+        return 0
+      fi
+    fi
+  done
+  fail "本地服务端口 ${REQUESTED_PORT}-$((REQUESTED_PORT + PORT_SCAN_LIMIT - 1)) 都已被占用，请关闭占用端口的程序后重试。"
 }
 
 if ! command -v python3 >/dev/null 2>&1; then
@@ -374,7 +470,8 @@ export MEDDRA_APP_STORE_MODE="1"
 export MEDDRA_DISTRIBUTION_MODE="app_store_candidate"
 export PYTHONPATH="${VENDOR_DIR}:${APP_ROOT}/backend"
 
-if ! curl -fsS --max-time 1 "http://${HOST}:${PORT}/api/source-roots" >/dev/null 2>&1; then
+select_port
+if [ "${REUSE_EXISTING_SERVER}" != "1" ]; then
   (
     cd "${APP_ROOT}"
     nohup "${PYTHON_CMD[@]}" -m uvicorn app.main:app --host "${HOST}" --port "${PORT}" >> "${SERVER_LOG}" 2>&1 &
@@ -383,13 +480,13 @@ if ! curl -fsS --max-time 1 "http://${HOST}:${PORT}/api/source-roots" >/dev/null
 fi
 
 for _ in {1..90}; do
-  if curl -fsS --max-time 1 "http://${HOST}:${PORT}/api/source-roots" >/dev/null 2>&1; then
+  if matching_runtime "$(runtime_payload "${PORT}")"; then
     break
   fi
   sleep 1
 done
 
-if ! curl -fsS --max-time 1 "http://${HOST}:${PORT}/api/source-roots" >/dev/null 2>&1; then
+if ! matching_runtime "$(runtime_payload "${PORT}")"; then
   fail "本地服务启动失败。"
 fi
 

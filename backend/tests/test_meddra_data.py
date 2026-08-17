@@ -19,6 +19,7 @@ from app.meddra_data import (
     default_source_config,
     discover_releases,
     fuzzy_score,
+    explicit_source_roots,
     select_release,
     split_dollar_line,
     version_slug,
@@ -61,6 +62,21 @@ class MeddraDataTests(unittest.TestCase):
                 self.assertEqual(discover_releases(), [])
                 with self.assertRaisesRegex(RuntimeError, "未发现可用的MedDRA"):
                     default_source_config()
+
+    def test_free_mac_app_support_dictionary_is_fallback_after_stale_source(self) -> None:
+        with TemporaryDirectory() as tmp:
+            support_root = Path(tmp) / "dictionaries"
+            support_root.mkdir()
+            with patch.dict(
+                os.environ,
+                {
+                    "MEDDRA_BROWSER_STATE_DIR": str(Path(tmp) / "state"),
+                    "MEDDRA_SOURCE_ROOT": "",
+                    "MEDDRA_DISTRIBUTION_MODE": "free_mac",
+                },
+                clear=False,
+            ), patch("app.meddra_data.mac_app_support_dictionary_root", return_value=support_root):
+                self.assertIn(support_root, explicit_source_roots())
 
     def test_release_discovery_allows_single_language_release(self) -> None:
         with TemporaryDirectory() as tmp:

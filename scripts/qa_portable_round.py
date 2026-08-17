@@ -63,8 +63,8 @@ def run_ui(page, app_url: str) -> list[str]:
     runtime = page.evaluate("async () => (await fetch('/api/runtime-info')).json()")
     assert runtime["distribution_mode"] == "portable"
     assert runtime["app_store_mode"] is False
-    assert runtime["version"] == "0.1.13"
-    checks.append("runtime-info is portable 0.1.13 not app-store")
+    assert runtime["version"] == "0.1.14"
+    checks.append("runtime-info is portable 0.1.14 not app-store")
 
     page.get_by_role("button", name="英文").click()
     expect(page.locator(".segmented button.active", has_text="英文")).to_be_visible()

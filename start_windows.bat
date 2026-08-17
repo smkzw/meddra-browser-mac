@@ -1,5 +1,6 @@
 @echo off
 setlocal EnableExtensions
+chcp 65001 >nul
 
 cd /d "%~dp0"
 
@@ -79,7 +80,10 @@ if not exist ".venv_windows\Scripts\python.exe" (
 )
 
 echo 正在检查后端依赖...
-if "%USING_BUNDLED_PYTHON%"=="1" if exist "wheelhouse\*.whl" set "USE_OFFLINE_WHEELHOUSE=1"
+if "%USING_BUNDLED_PYTHON%"=="1" (
+  dir /b /a-d "wheelhouse\*.whl" >nul 2>nul
+  if not errorlevel 1 set "USE_OFFLINE_WHEELHOUSE=1"
+)
 if "%USE_OFFLINE_WHEELHOUSE%"=="1" (
   echo 使用包内离线依赖包安装。
   ".venv_windows\Scripts\python.exe" -m pip install --no-index --find-links "%SCRIPT_DIR%wheelhouse" -r backend\requirements.txt

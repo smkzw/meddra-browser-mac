@@ -8,6 +8,7 @@ import os
 import re
 import shutil
 import sqlite3
+import sys
 import time
 import unicodedata
 from dataclasses import dataclass
@@ -199,7 +200,20 @@ def default_med_root() -> Path:
     roots = explicit_source_roots()
     if roots:
         return roots[0]
+    app_support_root = mac_app_support_dictionary_root()
+    if app_support_root is not None:
+        return app_support_root
     return Path(__file__).resolve().parents[2] / "dictionaries"
+
+
+def mac_app_support_dictionary_root() -> Path | None:
+    # The free macOS app owns this directory and can read it after Finder
+    # launch even when a previously selected Documents path is no longer
+    # available to the process. Portable and Windows runs must stay isolated
+    # from the host's app-support data.
+    if sys.platform != "darwin" or os.environ.get("MEDDRA_DISTRIBUTION_MODE") != "free_mac":
+        return None
+    return Path.home() / "Library" / "Application Support" / "MedDRA Browser Mac" / "dictionaries"
 
 
 def explicit_source_roots() -> list[Path]:
@@ -210,6 +224,9 @@ def explicit_source_roots() -> list[Path]:
             if raw.strip():
                 roots.append(Path(raw.strip()).expanduser())
     roots.extend(load_source_roots())
+    app_support_root = mac_app_support_dictionary_root()
+    if app_support_root is not None:
+        roots.append(app_support_root)
     unique: list[Path] = []
     for item in roots:
         if item not in unique:
