@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 from functools import lru_cache
 import json
 import os
@@ -16,8 +17,16 @@ from fastapi import FastAPI, HTTPException, Query, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
+from .coding import (
+    TermSuggester,
+    build_export_rows,
+    code_to_csv,
+    parse_data_listing_csv,
+    parse_data_listing_excel,
+    safe_download_filename,
+)
 from .meddra_data import (
     ALL_SEARCH_LEVELS,
     MeddraIndexer,
@@ -32,7 +41,7 @@ from .meddra_data import (
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 FRONTEND_DIST = PROJECT_ROOT / "frontend" / "dist"
 
-app = FastAPI(title="MedDRA Browser", version="0.1.14")
+app = FastAPI(title="MedDRA Browser", version="0.2.0")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:5173", "http://127.0.0.1:5173", "null"],
@@ -121,6 +130,24 @@ class ExportRequest(BaseModel):
 
 class SourceRootRequest(BaseModel):
     path: str
+
+
+class CodingImportRequest(BaseModel):
+    filename: str = "listing.xlsx"
+    content_base64: str
+
+
+class CodingSuggestRequest(BaseModel):
+    terms: list[str]
+    version: Optional[str] = None
+    mode: str = "both"
+    limit_per_term: int = Field(default=5, ge=1, le=20)
+
+
+class CodingExportRequest(BaseModel):
+    unique_terms: list[dict[str, Any]]
+    decisions: dict[str, dict[str, Any]] = Field(default_factory=dict)
+    filename: str = "meddra_coded_listing.csv"
 
 
 def index_job_key(config: Any) -> str:
@@ -508,10 +535,68 @@ def api_smq_analysis(level: str, code: str, version: Optional[str] = Query(defau
 @app.post("/api/export/csv")
 def api_export_csv(payload: ExportRequest) -> Response:
     csv_text = store().export_csv(payload.rows)
-    filename = Path(payload.filename).name or "meddra_export.csv"
+    filename = safe_download_filename(payload.filename, "meddra_export.csv")
     if csv_text and not csv_text.startswith("\ufeff"):
         # Excel on Chinese Windows defaults to the GBK codepage and garbles UTF-8
         # Chinese terms unless the file starts with a UTF-8 BOM.
+        csv_text = f"\ufeff{csv_text}"
+    return Response(
+        content=csv_text,
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@app.post("/api/coding/import")
+def api_coding_import(payload: CodingImportRequest) -> dict[str, Any]:
+    if not payload.content_base64:
+        raise HTTPException(status_code=400, detail="未收到文件内容")
+    try:
+        content = base64.b64decode(payload.content_base64, validate=True)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=400, detail="文件内容不是有效的 base64") from exc
+    if not content:
+        raise HTTPException(status_code=400, detail="文件为空")
+    if len(content) > 80 * 1024 * 1024:
+        raise HTTPException(status_code=413, detail="文件过大，请控制在 80MB 以内")
+    filename = payload.filename or "listing.xlsx"
+    try:
+        if filename.lower().endswith(".csv"):
+            parsed = parse_data_listing_csv(content, filename)
+        else:
+            parsed = parse_data_listing_excel(content, filename)
+    except Exception as exc:  # noqa: BLE001 - surface parse failure as a readable API error
+        raise HTTPException(status_code=400, detail=f"解析失败：{exc}") from exc
+    return parsed
+
+
+@app.post("/api/coding/suggest")
+def api_coding_suggest(payload: CodingSuggestRequest) -> dict[str, Any]:
+    if not payload.terms:
+        return {"suggestions": {}, "count": 0}
+    if len(payload.terms) > 2000:
+        raise HTTPException(status_code=400, detail="一次最多建议 2000 个唯一术语")
+    try:
+        active_store = require_ready_store(payload.version)
+        suggester = TermSuggester(active_store)
+        suggestions = suggester.suggest_batch(
+            payload.terms,
+            mode=payload.mode,
+            limit_per_term=payload.limit_per_term,
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=f"批量建议失败：{exc}") from exc
+    return {"suggestions": suggestions, "count": len(suggestions)}
+
+
+@app.post("/api/coding/export")
+def api_coding_export(payload: CodingExportRequest) -> Response:
+    rows = build_export_rows(payload.unique_terms, payload.decisions)
+    csv_text = code_to_csv(rows)
+    filename = safe_download_filename(payload.filename, "meddra_coded_listing.csv")
+    if csv_text and not csv_text.startswith("\ufeff"):
         csv_text = f"\ufeff{csv_text}"
     return Response(
         content=csv_text,

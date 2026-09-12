@@ -1,6 +1,7 @@
 import {
   ChevronRight,
   Clipboard,
+  ClipboardList,
   Download,
   Check,
   History,
@@ -16,9 +17,10 @@ import {
   Upload
 } from "lucide-react";
 import { ChangeEvent, CSSProperties, PointerEvent as ReactPointerEvent, useEffect, useMemo, useRef, useState } from "react";
+import CodingWorkspace from "./CodingWorkspace";
 
 type Mode = "zh" | "en" | "both";
-type ModuleKey = "search" | "advanced" | "detail" | "bin" | "history" | "settings";
+type ModuleKey = "search" | "advanced" | "detail" | "coding" | "bin" | "history" | "settings";
 type SearchLevel = "SOC" | "HLGT" | "HLT" | "PT" | "LLT" | "SMQ";
 type PaneSide = "left" | "right";
 
@@ -187,6 +189,7 @@ const LEVEL_OPTIONS: Array<{ key: SearchLevel; label: string; hint: string }> = 
 const MODULES: Array<{ key: ModuleKey; label: string; icon: JSX.Element }> = [
   { key: "search", label: "搜索", icon: <Search size={16} /> },
   { key: "advanced", label: "高级搜索", icon: <SlidersHorizontal size={16} /> },
+  { key: "coding", label: "批量编码", icon: <ClipboardList size={16} /> },
   { key: "detail", label: "详情关系", icon: <Layers size={16} /> },
   { key: "bin", label: "Research Bin", icon: <Clipboard size={16} /> },
   { key: "history", label: "历史记录", icon: <History size={16} /> },
@@ -1180,6 +1183,20 @@ export default function App() {
                 onOpenSmq={loadSmqDetail}
               />
             </section>
+          )}
+
+          {module === "coding" && (
+            <CodingWorkspace
+              version={version}
+              mode={mode}
+              versionReady={versionReady}
+              apiBase={API}
+              flash={flash}
+              onOpenDetail={({ level, code }) => {
+                void loadDetail(level, code);
+                setModule("detail");
+              }}
+            />
           )}
 
           {module === "bin" && (

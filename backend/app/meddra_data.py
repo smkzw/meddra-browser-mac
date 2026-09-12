@@ -16,7 +16,7 @@ from difflib import SequenceMatcher
 from functools import lru_cache
 from hashlib import sha1
 from pathlib import Path
-from typing import Any, Callable, Iterable
+from typing import Any, Callable, Iterator
 
 if os.name == "nt":
     import msvcrt
@@ -517,10 +517,14 @@ def normalize_version(version: str | None) -> str:
     return f"{int(match.group(1))}.{int(match.group(2))}"
 
 
-def version_key(version: str) -> tuple[int, int]:
+def version_key(version: str) -> tuple[int, int, str]:
     normalized = normalize_version(version)
     major, _, minor = normalized.partition(".")
-    return (int(major or 0), int(minor or 0))
+    try:
+        return (int(major or 0), int(minor or 0), "")
+    except ValueError:
+        # Non-numeric versions (e.g. "dev") sort after real numbers.
+        return (9999, 9999, normalized)
 
 
 def version_slug(version: str) -> str:
@@ -792,10 +796,13 @@ class MeddraIndexer:
 
     def _index_is_current(self) -> bool:
         try:
-            with sqlite3.connect(self.config.db_path) as con:
+            con = sqlite3.connect(self.config.db_path)
+            try:
                 row = con.execute(
                     "select value from index_metadata where key='source_signature'"
                 ).fetchone()
+            finally:
+                con.close()
         except sqlite3.DatabaseError:
             return False
         return bool(row and row[0] == self._source_signature())
@@ -1301,10 +1308,17 @@ class MeddraStore:
             ).fetchall()
             return tuple(dict(row) for row in rows)
 
-    def connect(self) -> sqlite3.Connection:
+    @contextmanager
+    def connect(self) -> Iterator[sqlite3.Connection]:
+        # sqlite3's `with connection` only commits; it does not close.
+        # Always close so long-running services do not leak file descriptors.
         con = sqlite3.connect(self.config.db_path)
         con.row_factory = sqlite3.Row
-        return con
+        try:
+            yield con
+            con.commit()
+        finally:
+            con.close()
 
     def status(self) -> dict[str, Any]:
         with self.connect() as con:
@@ -1367,6 +1381,8 @@ class MeddraStore:
             return fields
 
         def add(category: str, term: dict[str, Any], field: str, score: float, reason: str) -> None:
+            # Intentional: when PT and LLT share the same code they describe the same
+            # concept; keep the first hit (PT is ordered before LLT in all_terms).
             key = term["code"]
             if key in seen:
                 return
@@ -1489,14 +1505,17 @@ class MeddraStore:
             return False
 
         results: list[dict[str, Any]] = []
+        # Support up to 5 conditions; empty values are treated as always-true so
+        # boolean logic still matches the UI's fixed two-slot form when extras are blank.
+        active_conditions = [cond for cond in conditions[:5] if str(cond.get("value") or "").strip()]
+        if not active_conditions:
+            return {"query": payload, "results": [], "count": 0}
         for term in terms:
-            checks = [match_condition(term, cond) for cond in conditions[:2]]
-            if not checks:
-                continue
+            checks = [match_condition(term, cond) for cond in active_conditions]
             if boolean == "OR":
                 ok = any(checks)
             elif boolean == "NOT":
-                ok = checks[0] and not (checks[1] if len(checks) > 1 else False)
+                ok = checks[0] and not any(checks[1:])
             else:
                 ok = all(checks)
             if ok:
@@ -1666,14 +1685,19 @@ class MeddraStore:
         }
 
     def export_csv(self, rows: Iterable[dict[str, Any]]) -> str:
-        rows = list(rows)
+        materialized = list(rows)
         output = io.StringIO()
-        if not rows:
+        if not materialized:
             return ""
-        fieldnames = list(rows[0].keys())
-        writer = csv.DictWriter(output, fieldnames=fieldnames)
+        fieldnames: list[str] = []
+        for row in materialized:
+            for key in row.keys():
+                if key not in fieldnames:
+                    fieldnames.append(key)
+        writer = csv.DictWriter(output, fieldnames=fieldnames, extrasaction="ignore")
         writer.writeheader()
-        writer.writerows(rows)
+        for row in materialized:
+            writer.writerow({key: row.get(key, "") for key in fieldnames})
         return output.getvalue()
 
     def _search_response(
