@@ -4,15 +4,6 @@ set -eu
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 PACKAGE_ROOT="${ROOT_DIR}/build/portable/meddra-browser-portable"
 ZIP_PATH="${ROOT_DIR}/build/meddra-browser-portable.zip"
-APP_VERSION="$(python3 - "${ROOT_DIR}/frontend/package.json" <<'PY'
-import json
-import sys
-from pathlib import Path
-
-print(json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))["version"])
-PY
-)"
-WINDOWS_EMERGENCY_ZIP="${ROOT_DIR}/build/MedDRA-Browser-Windows-Emergency-v${APP_VERSION}.zip"
 WINDOWS_PYTHON_VERSION="${WINDOWS_PYTHON_VERSION:-3.13.14}"
 WINDOWS_PYTHON_TAG="${WINDOWS_PYTHON_TAG:-313}"
 WINDOWS_PYTHON_URL="${WINDOWS_PYTHON_URL:-https://www.python.org/ftp/python/${WINDOWS_PYTHON_VERSION}/python-${WINDOWS_PYTHON_VERSION}-amd64.exe}"
@@ -31,18 +22,21 @@ if [[ ! -s "${WINDOWS_INSTALLER_PATH}" ]]; then
   mv "${WINDOWS_INSTALLER_PATH}.tmp" "${WINDOWS_INSTALLER_PATH}"
 fi
 
-rm -rf "${WINDOWS_WHEELHOUSE_DIR}"
 mkdir -p "${WINDOWS_WHEELHOUSE_DIR}"
-python3 -m pip download \
-  --dest "${WINDOWS_WHEELHOUSE_DIR}" \
-  --platform win_amd64 \
-  --python-version "${WINDOWS_PYTHON_TAG}" \
-  --implementation cp \
-  --abi "cp${WINDOWS_PYTHON_TAG}" \
-  --only-binary=:all: \
-  -r backend/requirements.txt
+if [[ -n "$(/usr/bin/find "${WINDOWS_WHEELHOUSE_DIR}" -maxdepth 1 -type f -name '*.whl' -print -quit)" ]]; then
+  echo "Reusing existing Windows wheelhouse at ${WINDOWS_WHEELHOUSE_DIR}"
+else
+  python3 -m pip download \
+    --dest "${WINDOWS_WHEELHOUSE_DIR}" \
+    --platform win_amd64 \
+    --python-version "${WINDOWS_PYTHON_TAG}" \
+    --implementation cp \
+    --abi "cp${WINDOWS_PYTHON_TAG}" \
+    --only-binary=:all: \
+    -r backend/requirements.txt
+fi
 
-rm -rf "${PACKAGE_ROOT}" "${ZIP_PATH}" "${WINDOWS_EMERGENCY_ZIP}"
+rm -rf "${PACKAGE_ROOT}" "${ZIP_PATH}"
 mkdir -p \
   "${PACKAGE_ROOT}/backend" \
   "${PACKAGE_ROOT}/frontend" \
@@ -97,6 +91,7 @@ Mac：
 
 打开页面后，如果系统提示还没有词典，请点“选择词典文件夹”，在文件管理器或 Finder 里选择你的 MedDRA 文件夹。可以选 MedDRA_29_0_Chinese、MedDRA_29_0_English、MedAscii、ascii-290，或者它们的上级文件夹。
 使用时请保持第一步打开的窗口不要关闭；不用时关闭窗口即可停止服务。
+如果第二步页面提示还没有检测到服务，请先看同目录的“当前服务地址.txt”，或把第一步窗口里打印的地址粘贴到浏览器。本机如果已经打开了 Mac App 或其他占用 8765 的程序，便携版会自动改用其他端口。
 TXT
 
 chmod +x "${PACKAGE_ROOT}/scripts/start_meddra_server.sh"
@@ -116,14 +111,16 @@ package_root = Path(sys.argv[1])
 zip_path = Path(sys.argv[2])
 base = package_root.parent
 
-with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED, strict_timestamps=False) as zf:
     for path in sorted(package_root.rglob("*")):
         if path.is_file():
-            zf.write(path, path.relative_to(base).as_posix())
+            arcname = path.relative_to(base).as_posix()
+            info = zipfile.ZipInfo.from_file(path, arcname)
+            info.flag_bits |= 0x800
+            info.compress_type = zipfile.ZIP_DEFLATED
+            zf.writestr(info, path.read_bytes())
 PY
 }
 
 make_zip "${ZIP_PATH}"
-make_zip "${WINDOWS_EMERGENCY_ZIP}"
 echo "${ZIP_PATH}"
-echo "${WINDOWS_EMERGENCY_ZIP}"

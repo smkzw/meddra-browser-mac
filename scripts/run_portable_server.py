@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import atexit
+import json
 import os
+import signal
 import sys
 import threading
 import time
@@ -12,46 +15,191 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 HOST = os.environ.get("MEDDRA_BROWSER_HOST", "127.0.0.1")
-PORT = int(os.environ.get("MEDDRA_BROWSER_PORT", "8765"))
-BASE_URL = f"http://{HOST}:{PORT}/"
-READY_URL = f"{BASE_URL}api/source-roots"
+REQUESTED_PORT = int(os.environ.get("MEDDRA_BROWSER_PORT", "8765"))
+PORT = REQUESTED_PORT
+BASE_URL = ""
+READY_URL = ""
 HTML_ENTRY = ROOT / "第二步：双击我开始MedDRA浏览.html"
 FALLBACK_HTML_ENTRY = ROOT / "index.html"
+PORT_SCAN_LIMIT = 20
+
+
+def port_sidecar_path() -> Path:
+    return ROOT / "portable-active-port.js"
+
+
+def port_address_path() -> Path:
+    return ROOT / "当前服务地址.txt"
+
+
+def update_urls(port: int) -> None:
+    global PORT, BASE_URL, READY_URL
+    PORT = port
+    BASE_URL = browser_base_url(PORT)
+    READY_URL = f"{BASE_URL}api/runtime-info"
+
+
+def browser_base_url(port: int) -> str:
+    # 0.0.0.0 is a bind address, not an address a browser should navigate to.
+    browser_host = "127.0.0.1" if HOST in {"", "0.0.0.0", "::"} else HOST
+    return f"http://{browser_host}:{port}/"
+
+
+def runtime_info(port: int | None = None) -> dict[str, object] | None:
+    target_port = port if port is not None else PORT
+    url = f"http://{HOST}:{target_port}/api/runtime-info"
+    try:
+        with urllib.request.urlopen(url, timeout=1.5) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+            return payload if isinstance(payload, dict) else {"distribution_mode": "unknown"}
+    except urllib.error.HTTPError:
+        # A live server without our identity endpoint still owns this port.
+        return {"distribution_mode": "unknown"}
+    except (OSError, urllib.error.URLError, json.JSONDecodeError):
+        return None
+
+
+def is_portable_server(info: dict[str, object] | None) -> bool:
+    return bool(
+        info
+        and info.get("distribution_mode") == "portable"
+        and info.get("app_store_mode") is False
+    )
+
+
+def write_active_port_sidecar(port: int) -> None:
+    """Write a same-folder helper so the file:// step-2 page can open the
+    selected port even when Windows browsers block localhost fetch/JSONP.
+    """
+    payload = {
+        "port": port,
+        "url": browser_base_url(port),
+        "distribution_mode": "portable",
+        "app_store_mode": False,
+        "ready": True,
+    }
+    port_sidecar_path().write_text(
+        "window.__MEDDRA_PORTABLE_RUNTIME = "
+        + json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+        + ";\n",
+        encoding="utf-8",
+    )
+    port_address_path().write_text(
+        f"当前便携版服务地址：{payload['url']}\n"
+        "如果浏览器没有自动打开，请把上面的地址粘贴到浏览器地址栏，"
+        "或重新双击“第二步：双击我开始MedDRA浏览.html”。\n"
+        "本文件由第一步启动器自动更新，不会上传任何数据。\n",
+        encoding="utf-8",
+    )
+
+
+def clear_active_port_sidecar() -> None:
+    for path in (port_sidecar_path(), port_address_path()):
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            continue
+        except OSError:
+            continue
+
+
+def select_port() -> int:
+    for candidate in range(REQUESTED_PORT, REQUESTED_PORT + PORT_SCAN_LIMIT):
+        info = runtime_info(candidate)
+        if info is None:
+            if candidate != REQUESTED_PORT:
+                print(f"端口 {REQUESTED_PORT} 已被其他服务占用，便携版改用端口 {candidate}。", flush=True)
+            return candidate
+        if is_portable_server(info):
+            return candidate
+    raise RuntimeError(
+        f"端口 {REQUESTED_PORT}-{REQUESTED_PORT + PORT_SCAN_LIMIT - 1} 均已被其他服务占用，"
+        "请关闭其他 MedDRA 实例后重试。"
+    )
 
 
 def is_ready() -> bool:
-    try:
-        with urllib.request.urlopen(READY_URL, timeout=1.5) as response:
-            return 200 <= response.status < 500
-    except (OSError, urllib.error.URLError):
-        return False
+    return is_portable_server(runtime_info())
 
 
 def open_entry() -> None:
     if os.environ.get("MEDDRA_BROWSER_OPEN", "1") == "0":
         return
+    # Open the served page instead of the file:// helper whenever the bundle
+    # contains the built frontend. This avoids browser file-origin restrictions
+    # and makes the normal first-step double-click flow independent of CORS.
+    if (ROOT / "frontend" / "dist" / "index.html").exists():
+        webbrowser.open(BASE_URL)
+        return
     entry = HTML_ENTRY if HTML_ENTRY.exists() else FALLBACK_HTML_ENTRY
     if entry.exists():
-        webbrowser.open(entry.resolve().as_uri())
+        webbrowser.open(f"{entry.resolve().as_uri()}?port={PORT}")
     else:
         webbrowser.open(BASE_URL)
+
+
+def announce_ready() -> None:
+    print(f"MedDRA Browser 已启动：{BASE_URL}", flush=True)
+    if PORT != REQUESTED_PORT:
+        # The user may close the auto-opened tab and later double-click the
+        # step-2 file. Print the real address so it can be opened by hand.
+        print(
+            f"注意：默认端口 {REQUESTED_PORT} 被其他服务占用，本次改用端口 {PORT}。"
+            f"如果第二步页面没有自动跳转，请直接在浏览器打开 {BASE_URL}",
+            flush=True,
+        )
 
 
 def wait_until_ready_and_open() -> None:
     for _ in range(120):
         if is_ready():
-            print(f"MedDRA Browser 已启动：{BASE_URL}", flush=True)
+            # Do not publish a dead URL before uvicorn is actually reachable.
+            write_active_port_sidecar(PORT)
+            announce_ready()
             open_entry()
             return
         time.sleep(0.5)
-    print("MedDRA Browser 启动超时。请检查终端窗口中的错误信息。", file=sys.stderr, flush=True)
+    print(
+        "MedDRA Browser 启动超时（60 秒内没有就绪）。"
+        "请查看本窗口上方的错误信息；窗口请保持打开以便排查。",
+        file=sys.stderr,
+        flush=True,
+    )
 
 
 def main() -> int:
+    # Do not inherit the environment of an App Store candidate or another
+    # GUI-launched process when the portable bundle is started from Finder.
+    os.environ["MEDDRA_APP_STORE_MODE"] = "0"
+    os.environ["MEDDRA_DISTRIBUTION_MODE"] = "portable"
+    selected_port = select_port()
+    update_urls(selected_port)
     if is_ready():
+        write_active_port_sidecar(selected_port)
         print(f"MedDRA Browser 已在运行：{BASE_URL}", flush=True)
         open_entry()
         return 0
+
+    # Only the process that owns uvicorn may remove the sidecar on exit. A
+    # second double-click that only reopens the browser must leave it intact.
+    atexit.register(clear_active_port_sidecar)
+
+    def _portable_signal_guard(_sig_num, _frame):  # type: ignore[no-untyped-def]
+        # Uvicorn installs its graceful handlers while its server loop is
+        # active. This guard prevents the interpreter's default handler from
+        # bypassing the cleanup path during the short startup/shutdown window.
+        return
+
+    for _signal_name in ("SIGTERM", "SIGINT", "SIGHUP"):
+        _signal_number = getattr(signal, _signal_name, None)
+        if _signal_number is None:
+            continue
+        try:
+            signal.signal(_signal_number, _portable_signal_guard)
+        except (ValueError, OSError):
+            # Some hosts (notably Windows or embedded runners) reject handler
+            # installation; atexit and the finally block remain available.
+            continue
 
     sys.path.insert(0, str(ROOT / "backend"))
     os.environ.setdefault("PYTHONPATH", str(ROOT / "backend"))
@@ -60,11 +208,15 @@ def main() -> int:
         import uvicorn
     except ImportError as exc:
         print("未找到后端依赖 uvicorn。请重新运行第一步入口，或检查依赖安装是否失败。", file=sys.stderr)
+        clear_active_port_sidecar()
         raise SystemExit(1) from exc
 
     threading.Thread(target=wait_until_ready_and_open, daemon=True).start()
     print("正在启动 MedDRA Browser 本地服务。使用时请保持这个终端窗口打开；不用时可关闭窗口停止服务。", flush=True)
-    uvicorn.run("app.main:app", host=HOST, port=PORT, log_level="info")
+    try:
+        uvicorn.run("app.main:app", host=HOST, port=PORT, log_level="info")
+    finally:
+        clear_active_port_sidecar()
     return 0
 
 

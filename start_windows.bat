@@ -1,5 +1,6 @@
 @echo off
 setlocal EnableExtensions
+chcp 65001 >nul
 
 cd /d "%~dp0"
 
@@ -8,6 +9,8 @@ set "HOST=127.0.0.1"
 if "%MEDDRA_BROWSER_PORT%"=="" set "MEDDRA_BROWSER_PORT=8765"
 set "PORT=%MEDDRA_BROWSER_PORT%"
 set "PYTHONUTF8=1"
+set "MEDDRA_APP_STORE_MODE=0"
+set "MEDDRA_DISTRIBUTION_MODE=portable"
 set "LOCAL_PYTHON=%SCRIPT_DIR%.python_windows\python.exe"
 set "PYTHON_INSTALLER=%SCRIPT_DIR%tools\python\windows\python-installer.exe"
 set "PYTHON_EXE="
@@ -77,7 +80,10 @@ if not exist ".venv_windows\Scripts\python.exe" (
 )
 
 echo 正在检查后端依赖...
-if "%USING_BUNDLED_PYTHON%"=="1" if exist "wheelhouse\*.whl" set "USE_OFFLINE_WHEELHOUSE=1"
+if "%USING_BUNDLED_PYTHON%"=="1" (
+  dir /b /a-d "wheelhouse\*.whl" >nul 2>nul
+  if not errorlevel 1 set "USE_OFFLINE_WHEELHOUSE=1"
+)
 if "%USE_OFFLINE_WHEELHOUSE%"=="1" (
   echo 使用包内离线依赖包安装。
   ".venv_windows\Scripts\python.exe" -m pip install --no-index --find-links "%SCRIPT_DIR%wheelhouse" -r backend\requirements.txt
@@ -97,7 +103,7 @@ if errorlevel 1 (
 
 set "PYTHONPATH=%SCRIPT_DIR%backend"
 
-echo 正在启动 MedDRA Browser: http://%HOST%:%PORT%/
+echo 正在启动 MedDRA Browser 便携服务（默认端口 %PORT%，如已占用会自动选择其他端口）...
 echo 使用时请保持这个窗口打开；不用时关闭窗口即可。
 ".venv_windows\Scripts\python.exe" scripts\run_portable_server.py
 

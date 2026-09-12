@@ -2,12 +2,15 @@ from __future__ import annotations
 
 import os
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
+from workspace_paths import workspace_dictionary_root
+
 if not os.environ.get("MEDDRA_SOURCE_ROOT"):
-    os.environ["MEDDRA_SOURCE_ROOT"] = str(Path(__file__).resolve().parents[3])
+    os.environ["MEDDRA_SOURCE_ROOT"] = str(workspace_dictionary_root())
 
 from app.meddra_data import (
     REQUIRED_ASC_FILES,
@@ -16,6 +19,7 @@ from app.meddra_data import (
     default_source_config,
     discover_releases,
     fuzzy_score,
+    explicit_source_roots,
     select_release,
     split_dollar_line,
     version_slug,
@@ -59,6 +63,21 @@ class MeddraDataTests(unittest.TestCase):
                 with self.assertRaisesRegex(RuntimeError, "未发现可用的MedDRA"):
                     default_source_config()
 
+    def test_free_mac_app_support_dictionary_is_fallback_after_stale_source(self) -> None:
+        with TemporaryDirectory() as tmp:
+            support_root = Path(tmp) / "dictionaries"
+            support_root.mkdir()
+            with patch.dict(
+                os.environ,
+                {
+                    "MEDDRA_BROWSER_STATE_DIR": str(Path(tmp) / "state"),
+                    "MEDDRA_SOURCE_ROOT": "",
+                    "MEDDRA_DISTRIBUTION_MODE": "free_mac",
+                },
+                clear=False,
+            ), patch("app.meddra_data.mac_app_support_dictionary_root", return_value=support_root):
+                self.assertIn(support_root, explicit_source_roots())
+
     def test_release_discovery_allows_single_language_release(self) -> None:
         with TemporaryDirectory() as tmp:
             base = Path(tmp) / "MedDRA_30_1_English" / "MedAscii"
@@ -69,6 +88,22 @@ class MeddraDataTests(unittest.TestCase):
             self.assertFalse(release.complete)
             self.assertEqual(release.available_languages, ("en",))
             self.assertEqual(release.missing_languages, ("zh",))
+
+    def test_synonym_lookup_stays_inside_selected_root(self) -> None:
+        with TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            selected_root = workspace / "chosen-dictionary"
+            ascii_root = selected_root / "MedDRA_30_1_Chinese" / "ascii-301"
+            ascii_root.mkdir(parents=True)
+            for file_name in REQUIRED_ASC_FILES:
+                (ascii_root / file_name).write_text("", encoding="utf-8")
+            outside_mdb4 = workspace / "MDB4"
+            outside_mdb4.mkdir()
+            (outside_mdb4 / "meddra_synonym_english.asc").write_text("bleed$bleed$1\n", encoding="utf-8")
+
+            config = default_source_config("30.1", root=selected_root)
+
+            self.assertNotEqual(config.synonym_english.parent, outside_mdb4)
 
     def test_source_counts_match_local_29_0_distribution(self) -> None:
         status = self.store.status()
@@ -87,6 +122,26 @@ class MeddraDataTests(unittest.TestCase):
         processed_values = [int(row.get("processed_rows") or 0) for row in row_events]
         self.assertEqual(processed_values, sorted(processed_values))
         self.assertGreaterEqual(int(row_events[-1].get("processed_rows") or 0), int(row_events[-1].get("total_rows") or 0))
+
+    def test_failed_rebuild_keeps_valid_index_and_cleans_orphan_files(self) -> None:
+        with TemporaryDirectory() as tmp:
+            config = replace(self.config, db_path=Path(tmp) / "meddra_test.sqlite")
+            MeddraIndexer(config).ensure_index(force=True)
+            orphan = Path(tmp) / ".meddra_test.sqlite.previous.tmp"
+            orphan_journal = Path(f"{orphan}-journal")
+            orphan.touch()
+            orphan_journal.touch()
+
+            failing = MeddraIndexer(config)
+            with patch.object(failing, "_load_language", side_effect=RuntimeError("synthetic build failure")):
+                with self.assertRaisesRegex(RuntimeError, "synthetic build failure"):
+                    failing.ensure_index(force=True)
+
+            self.assertTrue(config.db_path.exists())
+            self.assertTrue(failing.is_current())
+            self.assertFalse(orphan.exists())
+            self.assertFalse(orphan_journal.exists())
+            self.assertFalse(list(Path(tmp).glob(".meddra_test.sqlite.*.tmp*")))
 
     def test_golden_terms_have_bilingual_names_and_hierarchy(self) -> None:
         rhabdo = self.store.details("PT", "10039020")

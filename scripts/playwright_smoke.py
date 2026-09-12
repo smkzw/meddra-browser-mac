@@ -191,6 +191,8 @@ def run(page: Page) -> list[str]:
     )
     page.reload(wait_until="networkidle")
 
+    expect(page).to_have_title("MedDRA Browser")
+    expect(page.locator(".brand h1")).to_have_text("MedDRA Browser")
     expect(page.locator(".module-nav button.active", has_text="搜索")).to_be_visible(timeout=15000)
     expect(page.get_by_text("建议最大化窗口后使用")).to_be_visible()
     expect(page.locator(".brand img")).to_be_visible()

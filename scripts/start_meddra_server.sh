@@ -31,5 +31,9 @@ if ! "${VENV_DIR}/bin/python" -m pip install -r "${REPO_DIR}/backend/requirement
 fi
 
 export PYTHONPATH="${REPO_DIR}/backend"
+# A portable bundle is never an App Store sandbox candidate. Set this here and
+# again in run_portable_server.py so it cannot inherit a stale GUI environment.
+export MEDDRA_APP_STORE_MODE="0"
+export MEDDRA_DISTRIBUTION_MODE="portable"
 echo "$$" > "${PID_FILE}"
 exec "${VENV_DIR}/bin/python" "${REPO_DIR}/scripts/run_portable_server.py"

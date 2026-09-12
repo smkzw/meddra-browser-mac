@@ -1,6 +1,7 @@
 import {
   ChevronRight,
   Clipboard,
+  ClipboardList,
   Download,
   Check,
   History,
@@ -16,9 +17,10 @@ import {
   Upload
 } from "lucide-react";
 import { ChangeEvent, CSSProperties, PointerEvent as ReactPointerEvent, useEffect, useMemo, useRef, useState } from "react";
+import CodingWorkspace from "./CodingWorkspace";
 
 type Mode = "zh" | "en" | "both";
-type ModuleKey = "search" | "advanced" | "detail" | "bin" | "history" | "settings";
+type ModuleKey = "search" | "advanced" | "browse" | "coding" | "detail" | "bin" | "history" | "settings";
 type SearchLevel = "SOC" | "HLGT" | "HLT" | "PT" | "LLT" | "SMQ";
 type PaneSide = "left" | "right";
 
@@ -187,6 +189,8 @@ const LEVEL_OPTIONS: Array<{ key: SearchLevel; label: string; hint: string }> = 
 const MODULES: Array<{ key: ModuleKey; label: string; icon: JSX.Element }> = [
   { key: "search", label: "搜索", icon: <Search size={16} /> },
   { key: "advanced", label: "高级搜索", icon: <SlidersHorizontal size={16} /> },
+  { key: "browse", label: "层级浏览", icon: <ListTree size={16} /> },
+  { key: "coding", label: "批量编码", icon: <ClipboardList size={16} /> },
   { key: "detail", label: "详情关系", icon: <Layers size={16} /> },
   { key: "bin", label: "Research Bin", icon: <Clipboard size={16} /> },
   { key: "history", label: "历史记录", icon: <History size={16} /> },
@@ -212,7 +216,10 @@ function displayName(item: { en_name?: string; zh_name?: string }, mode: Mode) {
 }
 
 function downloadText(filename: string, text: string, mime = "text/plain;charset=utf-8") {
-  const blob = new Blob([text], { type: mime });
+  // Excel on Chinese Windows assumes the system codepage (GBK) unless a UTF-8 BOM is present,
+  // which would garble Chinese MedDRA terms. JSON must stay BOM-free so JSON.parse works.
+  const needsBom = mime.includes("text/csv") && !text.startsWith("\ufeff");
+  const blob = new Blob([needsBom ? `\ufeff${text}` : text], { type: mime });
   const url = URL.createObjectURL(blob);
   const link = document.createElement("a");
   link.href = url;
@@ -287,6 +294,18 @@ function isMissingDictionaryMessage(message: string) {
   return message.includes("未发现可用的MedDRA") || message.includes("加入词典来源") || message.includes("还没有发现可用词典");
 }
 
+function isAppStoreCandidateMessage(message: string) {
+  return message.includes("App Store沙盒候选模式") || message.includes("安全作用域书签");
+}
+
+function sourceImportErrorMessage(error: unknown, fallback: string) {
+  const message = (error as Error)?.message || "";
+  if (isAppStoreCandidateMessage(message)) {
+    return "当前是 App Store 候选版，暂不支持从这里导入外部词典。请改用便携版或普通桌面版 MedDRA Browser。正式沙盒版需要原生文件夹选择器。";
+  }
+  return message || fallback;
+}
+
 function isIndexWaitingMessage(message: string) {
   return (
     message.includes("index_not_ready") ||
@@ -345,10 +364,14 @@ function clamp(value: number, min: number, max: number) {
 }
 
 function desiredCenterWidth(workspaceWidth: number) {
-  if (workspaceWidth <= STACKED_WORKSPACE_WIDTH) return 420;
-  if (workspaceWidth >= 1700) return 900;
-  if (workspaceWidth >= 1300) return Math.round(workspaceWidth * 0.52);
-  return Math.round(workspaceWidth * 0.5);
+  if (!workspaceWidth || workspaceWidth <= STACKED_WORKSPACE_WIDTH) return 420;
+  // Never demand a center wider than what remains after side panes + resizers,
+  // otherwise the CSS minmax() forces horizontal overflow when shrinking.
+  const sideBudget = MIN_LEFT_PANE_WIDTH + MIN_RIGHT_PANE_WIDTH + RESIZER_WIDTH_TOTAL;
+  const available = Math.max(420, workspaceWidth - sideBudget);
+  if (workspaceWidth >= 1700) return Math.min(900, available);
+  if (workspaceWidth >= 1300) return Math.min(Math.round(workspaceWidth * 0.52), available);
+  return Math.min(Math.round(workspaceWidth * 0.5), available);
 }
 
 function normalizePaneWidths(widths: PaneWidths, workspaceWidth: number): PaneWidths {
@@ -397,6 +420,9 @@ export default function App() {
   const [socRoots, setSocRoots] = useState<TreeNode[]>([]);
   const [smqRoots, setSmqRoots] = useState<TreeNode[]>([]);
   const [expanded, setExpanded] = useState<Record<string, TreeNode[]>>({});
+  const [browseStack, setBrowseStack] = useState<TreeNode[]>([]);
+  const [browseChildren, setBrowseChildren] = useState<TreeNode[]>([]);
+  const [browseLoading, setBrowseLoading] = useState(false);
   const [query, setQuery] = useState("");
   const [socFilter, setSocFilter] = useState("");
   const [selectedLevels, setSelectedLevels] = useState<SearchLevel[]>(["PT"]);
@@ -685,34 +711,84 @@ export default function App() {
     }
   }
 
-  async function loadDetail(level: string, itemCode: string) {
+  async function loadDetail(level: string, itemCode: string, options?: { switchModule?: boolean }) {
     if (!requireIndexReady("打开详情")) return;
     if (level === "SMQ") {
-      await loadSmqDetail(itemCode);
+      await loadSmqDetail(itemCode, options);
       return;
     }
     try {
       const data = await fetchJson<Detail>(apiPath(`/details/${level}/${itemCode}`, version), undefined, "详情加载失败");
       setDetail(data);
       setSmqDetail(null);
-      setModule("detail");
+      if (options?.switchModule !== false) {
+        setModule("detail");
+      }
       addHistory("打开详情", `${level} ${itemCode}`);
     } catch (error) {
       handleApiError(error, "详情加载失败");
     }
   }
 
-  async function loadSmqDetail(smqCode: string) {
+  async function loadSmqDetail(smqCode: string, options?: { switchModule?: boolean }) {
     if (!requireIndexReady("打开SMQ")) return;
     try {
       const data = await fetchJson<SmqDetail>(apiPath(`/smq/${smqCode}?mode=${mode}`, version), undefined, "SMQ详情加载失败");
       setSmqDetail(data);
       setDetail(null);
-      setModule("detail");
+      if (options?.switchModule !== false) {
+        setModule("detail");
+      }
       addHistory("打开SMQ", smqCode);
     } catch (error) {
       handleApiError(error, "SMQ详情加载失败");
     }
+  }
+
+  async function fetchTreeChildren(node: TreeNode, tab: "soc" | "smq" = treeTab): Promise<TreeNode[]> {
+    const codeValue = node.code || node.smq_code || "";
+    const url =
+      tab === "soc"
+        ? apiPath(`/tree/soc?level=${node.level}&code=${codeValue}&mode=${mode}`, version)
+        : apiPath(`/tree/smq?code=${codeValue}&mode=${mode}`, version);
+    const data = await fetchJson<{ nodes?: TreeNode[] }>(url, undefined, "子级加载失败");
+    return data.nodes || [];
+  }
+
+  async function openBrowse(node: TreeNode, stack?: TreeNode[]) {
+    if (!requireIndexReady("层级浏览")) return;
+    const nextStack = stack ? [...stack, node] : [...browseStack, node];
+    setBrowseStack(nextStack);
+    setModule("browse");
+    setBrowseLoading(true);
+    try {
+      const children = await fetchTreeChildren(node);
+      setBrowseChildren(children);
+      // Right pane still shows hierarchy detail, but we stay in the browse module.
+      await loadDetail(node.level || "SOC", node.code || node.smq_code || "", { switchModule: false });
+      addHistory("层级浏览", `${node.level} ${node.code || node.smq_code || ""}`);
+    } catch (error) {
+      setBrowseChildren([]);
+      handleApiError(error, "子级加载失败");
+    } finally {
+      setBrowseLoading(false);
+    }
+  }
+
+  function resetBrowseRoot(node: TreeNode) {
+    void openBrowse(node, []);
+  }
+
+  function popBrowse() {
+    if (browseStack.length <= 1) {
+      setBrowseStack([]);
+      setBrowseChildren([]);
+      return;
+    }
+    const nextStack = browseStack.slice(0, -1);
+    const parent = nextStack[nextStack.length - 1];
+    setBrowseStack(nextStack);
+    void openBrowse(parent, nextStack.slice(0, -1));
   }
 
   async function expandTree(node: TreeNode) {
@@ -865,7 +941,7 @@ export default function App() {
       setSourcePath("");
       flash("已绑定词典文件夹，正在建立本地索引");
     } catch (error) {
-      flash((error as Error).message || "无法打开文件夹选择器");
+      flash(sourceImportErrorMessage(error, "无法打开文件夹选择器"));
     } finally {
       setImportingSource(false);
     }
@@ -887,7 +963,7 @@ export default function App() {
       setSourcePath("");
       flash("已绑定词典文件夹，正在建立本地索引");
     } catch (error) {
-      flash((error as Error).message || "导入目录失败");
+      flash(sourceImportErrorMessage(error, "导入目录失败"));
     } finally {
       setImportingSource(false);
     }
@@ -972,9 +1048,9 @@ export default function App() {
     <div className="app-shell">
       <header className="app-header">
         <div className="brand">
-          <img src="/brand/app-icon-256.png" alt="" aria-hidden="true" />
+          <img src="/brand/app-icon-256.png" alt="MedDRA Browser" />
           <div>
-            <h1>MedDRA Browser Mac</h1>
+            <h1>MedDRA Browser</h1>
             <span>本地词典浏览 · 中文界面 · MedDRA {version || status?.version || "自动选择"}</span>
           </div>
         </div>
@@ -1049,11 +1125,14 @@ export default function App() {
                   treeTab={treeTab}
                   expanded={expanded}
                   onExpand={expandTree}
-                  onOpen={(opened) =>
-                    treeTab === "soc"
-                      ? loadDetail(opened.level, opened.code || "")
-                      : loadSmqDetail(opened.smq_code || opened.code || "")
-                  }
+                  onOpen={(opened) => {
+                    if (treeTab === "smq") {
+                      void loadSmqDetail(opened.smq_code || opened.code || "");
+                      return;
+                    }
+                    // stack is the ancestor path; openBrowse appends `opened`.
+                    void openBrowse(opened, []);
+                  }}
                 />
               ))
             )}
@@ -1069,9 +1148,24 @@ export default function App() {
         />
 
         <main className="center-pane">
-          <nav className="module-nav">
-            {MODULES.map((item) => (
-              <button key={item.key} className={module === item.key ? "active" : ""} onClick={() => setModule(item.key)}>
+          <nav className="module-nav" role="toolbar" aria-label="功能模块">
+            {MODULES.map((item, index) => (
+              <button
+                key={item.key}
+                type="button"
+                className={module === item.key ? "active" : ""}
+                tabIndex={module === item.key ? 0 : -1}
+                onClick={() => setModule(item.key)}
+                onKeyDown={(event) => {
+                  if (event.key !== "ArrowRight" && event.key !== "ArrowLeft") return;
+                  event.preventDefault();
+                  const delta = event.key === "ArrowRight" ? 1 : -1;
+                  const next = MODULES[(index + delta + MODULES.length) % MODULES.length];
+                  setModule(next.key);
+                  const buttons = event.currentTarget.parentElement?.querySelectorAll("button");
+                  buttons?.[((index + delta + MODULES.length) % MODULES.length)]?.focus();
+                }}
+              >
                 {item.icon}
                 {item.label}
                 {item.key === "bin" && bin.length > 0 && <span className="nav-badge">{bin.length}</span>}
@@ -1153,6 +1247,112 @@ export default function App() {
             </section>
           )}
 
+          {module === "browse" && (
+            <section className="module browse-module">
+              {!browseStack.length ? (
+                <EmptyState text="在左侧点击 SOC / HLGT / HLT，下层级会在这里展开浏览。" />
+              ) : (
+                <>
+                  <nav className="browse-crumb" aria-label="层级路径">
+                    {browseStack.map((item, index) => {
+                      const isLast = index === browseStack.length - 1;
+                      return (
+                        <span key={`${item.level}-${item.code}-${index}`} className="browse-crumb-item">
+                          {index > 0 && <ChevronRight size={12} />}
+                          <button
+                            type="button"
+                            className={isLast ? "current" : ""}
+                            disabled={isLast}
+                            onClick={() => {
+                              const stack = browseStack.slice(0, index + 1);
+                              const node = stack[stack.length - 1];
+                              setBrowseStack(stack.slice(0, -1));
+                              void openBrowse(node, stack.slice(0, -1));
+                            }}
+                          >
+                            {item.level} · {displayName(item, mode)}
+                          </button>
+                        </span>
+                      );
+                    })}
+                  </nav>
+                  <header className="browse-hero">
+                    <div>
+                      <span className={`level-badge level-${browseStack[browseStack.length - 1]?.level || "SOC"}`}>
+                        {browseStack[browseStack.length - 1]?.level || ""}
+                      </span>
+                      <h2>{displayName(browseStack[browseStack.length - 1], mode)}</h2>
+                      <p className="browse-code">代码 {browseStack[browseStack.length - 1]?.code || browseStack[browseStack.length - 1]?.smq_code}</p>
+                    </div>
+                    <div className="browse-actions">
+                      <button onClick={popBrowse} disabled={browseStack.length <= 1}>返回上级</button>
+                      <button
+                        className="primary"
+                        onClick={() => {
+                          const current = browseStack[browseStack.length - 1];
+                          if (current) void loadDetail(current.level || "SOC", current.code || "");
+                        }}
+                      >
+                        <Layers size={14} /> 打开详情
+                      </button>
+                    </div>
+                  </header>
+                  {browseLoading ? (
+                    <EmptyState text="正在加载下层级…" />
+                  ) : browseChildren.length ? (
+                    <div className="browse-grid">
+                      {browseChildren.map((child) => {
+                        const code = child.code || child.smq_code || "";
+                        const canDrill = child.has_children !== false && child.level !== "LLT";
+                        return (
+                          <article key={`${child.level}-${code}`} className="browse-card kz-card">
+                            <div className="browse-card-top">
+                              <span className={`level-badge level-${child.level}`}>{child.level}</span>
+                              <em>{code}</em>
+                            </div>
+                            <h3>{displayName(child, mode)}</h3>
+                            <div className="browse-card-actions">
+                              {canDrill && (
+                                <button className="primary mini" onClick={() => void openBrowse(child)}>
+                                  进入下级
+                                </button>
+                              )}
+                              <button className="mini" onClick={() => void loadDetail(child.level, code)}>
+                                详情
+                              </button>
+                              <button
+                                className="mini"
+                                onClick={() =>
+                                  addToBin({
+                                    level: child.level,
+                                    level_label: child.level || "",
+                                    code,
+                                    en_name: child.en_name || "",
+                                    zh_name: child.zh_name || "",
+                                    is_current: child.is_current || "",
+                                    category: "browse",
+                                    category_label: "层级浏览",
+                                    matched_field: "层级浏览",
+                                    score: 100,
+                                    reason: "来自层级浏览",
+                                  })
+                                }
+                              >
+                                收藏
+                              </button>
+                            </div>
+                          </article>
+                        );
+                      })}
+                    </div>
+                  ) : (
+                    <EmptyState text="当前节点没有可展开的下层级。可点「打开详情」查看完整关系树。" />
+                  )}
+                </>
+              )}
+            </section>
+          )}
+
           {module === "detail" && (
             <section className="module">
               <DetailWorkspace
@@ -1165,6 +1365,20 @@ export default function App() {
                 onOpenSmq={loadSmqDetail}
               />
             </section>
+          )}
+
+          {module === "coding" && (
+            <CodingWorkspace
+              version={version}
+              mode={mode}
+              versionReady={versionReady}
+              apiBase={API}
+              flash={flash}
+              onOpenDetail={({ level, code }) => {
+                void loadDetail(level, code);
+                setModule("detail");
+              }}
+            />
           )}
 
           {module === "bin" && (
@@ -1355,7 +1569,13 @@ function TreeRow({
   return (
     <div>
       <div className="tree-row" style={{ paddingLeft: `${depth * 16 + 8}px` }}>
-        <button className="tree-toggle" onClick={() => node.has_children !== false && onExpand(node)} title="展开">
+        <button
+          className="tree-toggle"
+          onClick={() => node.has_children !== false && onExpand(node)}
+          title={children ? "收起" : "展开"}
+          aria-expanded={Boolean(children)}
+          aria-label={`${children ? "收起" : "展开"} ${node.display_name}`}
+        >
           <ChevronRight size={14} className={children ? "rotated" : ""} />
         </button>
         <button className="tree-label" onClick={() => onOpen(node)} title={`${node.display_name} · ${node.code || node.smq_code}`}>
@@ -1628,10 +1848,21 @@ function RelationshipTreePanel({
     : detail?.term
       ? `${detail.term.level}:${detail.term.code}`
       : "empty";
-  const [openGroups, setOpenGroups] = useState<Record<string, boolean>>({});
+  const [openGroups, setOpenGroups] = useState<Record<string, boolean>>(() => ({
+    // Keep the primary children branch expanded so the right pane is readable by default.
+    "term-children:0": true,
+    "smq-content": true,
+    "smq-children": false
+  }));
 
   useEffect(() => {
-    setOpenGroups({});
+    // Reset per-term open state, but keep the primary children branch expanded
+    // so the right pane stays readable after each selection.
+    setOpenGroups({
+      "term-children:0": true,
+      "smq-content": true,
+      "smq-children": false
+    });
   }, [activeKey]);
 
   const toggleGroup = (key: string) => {
@@ -1845,7 +2076,12 @@ function CollapsedTreeGroup({
 }) {
   return (
     <div className="relationship-tree-group">
-      <button className="relationship-tree-toggle" style={depthStyle(depth)} onClick={() => onToggle(groupKey)}>
+      <button
+        className={`relationship-tree-toggle${open ? " open rotated" : ""}`}
+        style={depthStyle(depth)}
+        aria-expanded={open}
+        onClick={() => onToggle(groupKey)}
+      >
         <ChevronRight size={14} className={open ? "rotated" : ""} />
         <span>{title}</span>
         <strong>{nodes.length}</strong>

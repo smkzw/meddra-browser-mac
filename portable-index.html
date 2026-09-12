@@ -58,6 +58,25 @@
         border-radius: 8px;
         background: #edf7f3;
       }
+      .status-actions {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        flex-wrap: wrap;
+      }
+      button {
+        padding: 9px 14px;
+        border: 1px solid #126451;
+        border-radius: 7px;
+        color: #fff;
+        background: #126451;
+        font: inherit;
+        font-weight: 700;
+        cursor: pointer;
+      }
+      button:hover {
+        background: #0d4f40;
+      }
       .steps {
         display: grid;
         gap: 10px;
@@ -87,23 +106,195 @@
         return "请先运行与你电脑系统对应的“第一步”文件。";
       }
 
-      async function checkServer() {
-        const status = document.getElementById("status");
+      function isPortableInfo(info) {
+        return Boolean(
+          info &&
+          info.distribution_mode === "portable" &&
+          info.app_store_mode === false
+        );
+      }
+
+      const DEFAULT_PORT = 8765;
+      const SCAN_WIDTH = 20;
+
+      function hintedPort() {
+        const queryValue = Number.parseInt(
+          new URLSearchParams(window.location.search).get("port") || "",
+          10
+        );
+        return Number.isInteger(queryValue) && queryValue >= 1024 && queryValue <= 65500
+          ? queryValue
+          : null;
+      }
+
+      async function fetchRuntimeInfo(port) {
+        const controller = new AbortController();
+        const timeout = window.setTimeout(() => controller.abort(), 800);
         try {
-          const response = await fetch("http://127.0.0.1:8765/api/source-roots", { cache: "no-store" });
-          if (response.ok) {
-            status.textContent = "本地服务已启动，正在打开浏览器界面...";
-            window.location.href = "http://127.0.0.1:8765/";
-            return;
-          }
-          status.textContent = "本地服务暂时不可用。" + platformStepText();
-          window.setTimeout(checkServer, 2000);
+          const response = await fetch(`http://127.0.0.1:${port}/api/runtime-info`, {
+            cache: "no-store",
+            signal: controller.signal,
+          });
+          if (!response.ok) return null;
+          const info = await response.json();
+          return isPortableInfo(info) ? info : null;
         } catch (error) {
-          status.textContent = "还没有检测到本地服务。" + platformStepText();
-          window.setTimeout(checkServer, 2000);
+          return null;
+        } finally {
+          window.clearTimeout(timeout);
         }
       }
-      window.addEventListener("DOMContentLoaded", checkServer);
+
+      function jsonpRuntimeInfo(port) {
+        return new Promise((resolve) => {
+          const base = `http://127.0.0.1:${port}`;
+          const callbackName = `__meddraPortableProbe${Date.now()}${Math.random().toString(36).slice(2)}`;
+          const script = document.createElement("script");
+          let settled = false;
+          const cleanup = (result) => {
+            if (settled) return;
+            settled = true;
+            window.clearTimeout(timeout);
+            script.remove();
+            try {
+              delete window[callbackName];
+            } catch (error) {
+              window[callbackName] = undefined;
+            }
+            resolve(result);
+          };
+          const timeout = window.setTimeout(() => cleanup(null), 1200);
+          window[callbackName] = (info) => {
+            cleanup(isPortableInfo(info) ? info : null);
+          };
+          script.async = true;
+          script.onerror = () => cleanup(null);
+          script.src = `${base}/api/runtime-info?callback=${encodeURIComponent(callbackName)}&t=${Date.now()}`;
+          document.head.appendChild(script);
+        });
+      }
+
+      async function probePort(port) {
+        const fetched = await fetchRuntimeInfo(port);
+        if (fetched) return fetched;
+        // A file:// page can be blocked from fetch/XHR by Windows browser
+        // security policies. JSONP uses a script load and works in that case.
+        return jsonpRuntimeInfo(port);
+      }
+
+      function loadSidecarRuntime() {
+        return new Promise((resolve) => {
+          if (window.__MEDDRA_PORTABLE_RUNTIME && window.__MEDDRA_PORTABLE_RUNTIME.url) {
+            resolve(window.__MEDDRA_PORTABLE_RUNTIME);
+            return;
+          }
+          const script = document.createElement("script");
+          const finish = (value) => {
+            script.remove();
+            resolve(value);
+          };
+          script.async = true;
+          script.onload = () => finish(window.__MEDDRA_PORTABLE_RUNTIME || null);
+          script.onerror = () => finish(null);
+          script.src = "portable-active-port.js?t=" + Date.now();
+          document.head.appendChild(script);
+        });
+      }
+
+      function candidatePorts(sidecarPort = null) {
+        const ports = [];
+        const push = (port) => {
+          if (Number.isInteger(port) && port >= 1024 && port <= 65535 && !ports.includes(port)) {
+            ports.push(port);
+          }
+        };
+        if (Number.isInteger(sidecarPort)) push(sidecarPort);
+        const hint = hintedPort();
+        if (hint !== null) {
+          for (let index = 0; index < SCAN_WIDTH; index += 1) push(hint + index);
+        }
+        for (let index = 0; index < SCAN_WIDTH; index += 1) push(DEFAULT_PORT + index);
+        return ports;
+      }
+
+      let attempts = 0;
+      let retryTimer = null;
+      const MAX_AUTOMATIC_ATTEMPTS = 30;
+
+      function setStatus(message, allowRetry = false) {
+        const status = document.getElementById("status");
+        const retry = document.getElementById("retry");
+        status.textContent = message;
+        retry.hidden = !allowRetry;
+      }
+
+      async function checkServer() {
+        const sidecar = await loadSidecarRuntime();
+        const sidecarReady = Boolean(
+          sidecar &&
+          sidecar.ready === true &&
+          sidecar.distribution_mode === "portable" &&
+          sidecar.app_store_mode === false &&
+          typeof sidecar.url === "string" &&
+          Number.isInteger(sidecar.port)
+        );
+        const ports = candidatePorts(sidecarReady ? sidecar.port : null);
+        const candidates = await Promise.all(ports.map(async (port) => {
+          const info = await probePort(port);
+          return info ? { port, base: `http://127.0.0.1:${port}`, info } : null;
+        }));
+        const portable = candidates.find(Boolean);
+        if (portable) {
+          setStatus(`本地服务已启动（端口 ${portable.port}），正在打开浏览器界面...`);
+          window.location.href = `${portable.base}/`;
+          return;
+        }
+
+        // A file:// page can be denied every localhost probe by the browser.
+        // The launcher writes this sidecar only after the service is ready, so
+        // it is a safe last-resort handoff for that specific origin. If the
+        // sidecar port was actually probed and returned null, however, the
+        // sidecar is stale (for example after a forced process kill); following
+        // it would strand the user on a browser connection-error page.
+        const sidecarProbedStale = sidecarReady && ports.includes(sidecar.port)
+          && candidates[ports.indexOf(sidecar.port)] === null;
+        if (window.location.protocol === "file:" && sidecarReady && !sidecarProbedStale) {
+          setStatus("浏览器限制了本机探测，正在使用第一步写入的服务地址 " + sidecar.url + " ...");
+          window.location.href = sidecar.url;
+          return;
+        }
+
+        attempts += 1;
+        const sortedPorts = [...ports].sort((a, b) => a - b);
+        const rangeStart = sortedPorts[0];
+        const rangeEnd = sortedPorts[sortedPorts.length - 1];
+        const scanned = rangeStart === rangeEnd
+          ? `${rangeStart}`
+          : `${rangeStart}-${rangeEnd}（共 ${ports.length} 个）`;
+        if (attempts >= MAX_AUTOMATIC_ATTEMPTS) {
+          setStatus(
+            `暂时没有检测到便携版服务（已检测端口 ${scanned}）。请先启动对应系统的“第一步”文件，` +
+            "保持窗口打开后点击“重新检测”。",
+            true,
+          );
+          return;
+        }
+        setStatus(
+          `还没有检测到便携版服务（已检测端口 ${scanned}，第 ${attempts} 次）；` +
+          "请先启动对应系统的“第一步”文件，并保持那个窗口不要关闭。",
+        );
+        retryTimer = window.setTimeout(checkServer, 2000);
+      }
+      window.addEventListener("DOMContentLoaded", () => {
+        document.getElementById("retry").addEventListener("click", () => {
+          if (retryTimer !== null) window.clearTimeout(retryTimer);
+          retryTimer = null;
+          attempts = 0;
+          setStatus("正在重新检测本地服务...");
+          checkServer();
+        });
+        checkServer();
+      });
     </script>
   </head>
   <body>
@@ -127,7 +318,10 @@
         </div>
       </div>
       <p>进入系统后，如果提示还没有词典，请点“选择词典文件夹”。在文件管理器或 Finder 里选你的 MedDRA 文件夹即可，比如 MedDRA_29_0_Chinese、MedDRA_29_0_English、MedAscii、ascii-290，或它们的上级文件夹。</p>
-      <div id="status" class="status">正在检测本地服务...</div>
+      <div class="status-actions">
+        <div id="status" class="status">正在检测本地服务...</div>
+        <button id="retry" type="button" hidden>重新检测</button>
+      </div>
     </main>
   </body>
 </html>

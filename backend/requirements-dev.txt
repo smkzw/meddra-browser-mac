@@ -1,0 +1,4 @@
+-r requirements.txt
+# fastapi.testclient / starlette.testclient require httpx at runtime.
+# Kept out of requirements.txt so the portable wheelhouse stays runtime-only.
+httpx
