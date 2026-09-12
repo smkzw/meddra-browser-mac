@@ -613,11 +613,20 @@ def app_index() -> FileResponse:
     return FileResponse(index)
 
 
-@app.get("/{path:path}")
-def app_static_fallback(path: str) -> FileResponse:
+@app.head("/")
+def app_index_head() -> Response:
+    index = FRONTEND_DIST / "index.html"
+    if not index.exists():
+        raise HTTPException(status_code=404, detail="前端尚未构建，请先运行 npm run build")
+    return Response(status_code=200, headers={"Content-Type": "text/html; charset=utf-8"})
+
+
+@app.api_route("/{path:path}", methods=["GET", "HEAD"])
+def app_static_fallback(path: str) -> Response:
     if path.startswith("api/"):
         raise HTTPException(status_code=404, detail="API路径不存在")
     target = (FRONTEND_DIST / path).resolve()
     if FRONTEND_DIST in target.parents and target.is_file():
+        # FileResponse omits the body for HEAD requests.
         return FileResponse(target)
     return app_index()

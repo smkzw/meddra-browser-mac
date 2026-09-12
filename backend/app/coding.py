@@ -8,7 +8,15 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable
 
-from .meddra_data import LEVEL_LABELS, fuzzy_candidate, fuzzy_score, fuzzy_threshold, normalize_text, token_key
+from .meddra_data import (
+    LEVEL_LABELS,
+    clinical_zh_expansions,
+    fuzzy_candidate,
+    fuzzy_score,
+    fuzzy_threshold,
+    normalize_text,
+    token_key,
+)
 
 
 # Data listing columns that usually need MedDRA coding (label fragment → coding type).
@@ -463,6 +471,16 @@ class TermSuggester:
                         if name and token_key(str(name)) == query_key:
                             push(term, "lexical", 94, "词元集合一致（词序变体）")
                             break
+
+        if not exact_hits:
+            # Clinical colloquial Chinese → MedDRA preferred wording (e.g. 过敏性→变应性).
+            for rewritten, reason in clinical_zh_expansions(query):
+                rewritten_norm = normalize_text(rewritten)
+                if not rewritten_norm or rewritten_norm == norm_query:
+                    continue
+                for lang in langs:
+                    for term in self._norm_index.get((lang, rewritten_norm), []):
+                        push(term, "alias", 92, reason)
 
         if not exact_hits and len(norm_query) >= 2:
             # Containment match: verbatim is inside a MedDRA term or vice versa.

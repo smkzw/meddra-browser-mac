@@ -81,6 +81,47 @@ INDEX_BUILD_LOCK_TIMEOUT_SECONDS = 3.0
 MIN_INDEX_FREE_SPACE_BYTES = 512 * 1024 * 1024
 MIN_INDEX_TEMP_LIMIT_BYTES = 512 * 1024 * 1024
 
+# Clinical colloquial Chinese → MedDRA Chinese preferred wording.
+# Used only as extra search/coding expansions; never rewrites the dictionary.
+CLINICAL_ZH_ALIASES: tuple[tuple[str, str], ...] = (
+    ("过敏性", "变应性"),
+    ("变态反应性", "变应性"),
+    ("过敏性休克", "变应性休克"),
+    ("药物过敏", "药物变应性反应"),
+    ("青霉素过敏", "青霉素变应性反应"),
+    ("高血压病", "高血压"),
+    ("上感", "上呼吸道感染"),
+    ("上呼吸道卡他", "上呼吸道炎症"),
+    ("发热", "体温升高"),
+    ("头晕", "眩晕"),
+    ("头昏", "眩晕"),
+    ("皮疹", "皮疹"),
+    ("恶心呕吐", "恶心"),
+    ("转氨酶升高", "肝酶升高"),
+    ("白细胞减少", "白细胞计数降低"),
+    ("血小板减少", "血小板计数降低"),
+    ("心慌", "心悸"),
+    ("气短", "呼吸困难"),
+    ("腹泻", "腹泻"),
+    ("便秘", "便秘"),
+    ("水肿", "水肿"),
+    ("瘙痒", "瘙痒症"),
+)
+
+
+def clinical_zh_expansions(query: str) -> list[tuple[str, str]]:
+    """Return colloquial→MedDRA rewrites for a Chinese verbatim/query."""
+    text = (query or "").strip()
+    if not text:
+        return []
+    out: list[tuple[str, str]] = []
+    for colloquial, meddra in CLINICAL_ZH_ALIASES:
+        if colloquial in text and colloquial != meddra:
+            rewritten = text.replace(colloquial, meddra)
+            if rewritten != text:
+                out.append((rewritten, f"临床口语映射「{colloquial}」→「{meddra}」"))
+    return out
+
 
 @dataclass(frozen=True)
 class ReleaseInfo:
@@ -1421,6 +1462,20 @@ class MeddraStore:
                         if expanded_norm in normalize_text(value, ignore_diacritics=ignore_diacritics):
                             add("synonym", term, field, 88, f"查询词通过同义词组“{source}”扩展为“{expanded}”")
                             break
+            if mode in ("zh", "both"):
+                for expanded, reason in clinical_zh_expansions(query):
+                    expanded_norm = normalize_text(expanded, ignore_diacritics=ignore_diacritics)
+                    if not expanded_norm or expanded_norm == norm_query:
+                        continue
+                    for term in terms:
+                        for field, value in fields_for(term):
+                            norm_value = normalize_text(value, ignore_diacritics=ignore_diacritics)
+                            if norm_value == expanded_norm:
+                                add("synonym", term, field, 90, reason)
+                                break
+                            if expanded_norm in norm_value:
+                                add("synonym", term, field, 86, reason)
+                                break
 
         for term in terms:
             for field, value in fields_for(term):
@@ -1756,18 +1811,37 @@ class MeddraStore:
     def _synonym_expansions(self, query: str, mode: str, ignore_diacritics: bool) -> list[tuple[str, str]]:
         langs = ["en", "zh"] if mode == "both" else [mode]
         norm_query = normalize_text(query, ignore_diacritics=ignore_diacritics)
+        if not norm_query:
+            return []
         expansions: list[tuple[str, str]] = []
         with self.connect() as con:
             for lang in langs:
                 rows = con.execute("select * from synonyms where lang=?", (lang,)).fetchall()
-                matching_groups = {
-                    row["synonym_group"]
-                    for row in rows
-                    if normalize_text(row["phrase"], ignore_diacritics=ignore_diacritics) in norm_query
-                }
+                matching_groups: set[str] = set()
                 for row in rows:
-                    if row["synonym_group"] in matching_groups:
-                        expansions.append((row["phrase"], row["synonym_group"]))
+                    phrase = normalize_text(row["phrase"], ignore_diacritics=ignore_diacritics)
+                    if not phrase:
+                        continue
+                    # Single-character / very short phrases (e.g. 「高」) are too ambiguous
+                    # as substring probes inside longer Chinese queries such as 高血压.
+                    if phrase == norm_query:
+                        matching_groups.add(row["synonym_group"])
+                        continue
+                    if len(phrase) >= 3 and phrase in norm_query:
+                        matching_groups.add(row["synonym_group"])
+                        continue
+                    if len(phrase) >= 2 and phrase.isascii():
+                        if re.search(rf"(?<![a-z0-9]){re.escape(phrase)}(?![a-z0-9])", norm_query):
+                            matching_groups.add(row["synonym_group"])
+                for row in rows:
+                    if row["synonym_group"] not in matching_groups:
+                        continue
+                    phrase = normalize_text(row["phrase"], ignore_diacritics=ignore_diacritics)
+                    # Never emit single-character expansions, even when a multi-char
+                    # phrase from the same group matched (e.g. group「高」containing「增」).
+                    if len(phrase) < 2:
+                        continue
+                    expansions.append((row["phrase"], row["synonym_group"]))
         return expansions
 
     def _term_relationships(

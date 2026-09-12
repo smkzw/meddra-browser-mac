@@ -196,6 +196,7 @@ export default function CodingWorkspace({
   const [filterStatus, setFilterStatus] = useState<"all" | DecisionStatus | "no_match">("all");
   const [filterType, setFilterType] = useState<string>("all");
   const [restored, setRestored] = useState(false);
+  const [pasteText, setPasteText] = useState("");
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   useEffect(() => {
@@ -289,7 +290,7 @@ export default function CodingWorkspace({
     setImporting(true);
     try {
       const content = await fileToBase64(file);
-      const parsed = await fetchJson<ImportResult>(`${apiBase}/api/coding/import`, {
+      const parsed = await fetchJson<ImportResult>(`${apiBase}/coding/import`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ filename: file.name, content_base64: content }),
@@ -324,7 +325,7 @@ export default function CodingWorkspace({
     try {
       const payloadTerms = sourceTerms.map((item) => item.term);
       const data = await fetchJson<{ suggestions: Record<string, UniqueTerm["suggestion"]> }>(
-        `${apiBase}/api/coding/suggest`,
+        `${apiBase}/coding/suggest`,
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -353,6 +354,35 @@ export default function CodingWorkspace({
     } finally {
       setSuggesting(false);
     }
+  }
+
+  async function runPasteDryRun() {
+    const lines = pasteText
+      .split(/[\n,，;；\t]+/)
+      .map((line) => line.trim())
+      .filter(Boolean);
+    if (!lines.length) {
+      setError("请先粘贴术语列表（每行一个，或用逗号分隔）");
+      return;
+    }
+    const counts = new Map<string, number>();
+    lines.forEach((term) => counts.set(term, (counts.get(term) || 0) + 1));
+    const nextTerms: UniqueTerm[] = Array.from(counts.entries()).map(([term, count]) => ({
+      term,
+      coding_type: "AE",
+      count,
+      occurrences: [{ sheet: "粘贴列表", column: "verbatim" }],
+    }));
+    setError("");
+    setDecisions({});
+    persistTerms(nextTerms, {}, `粘贴列表-${nextTerms.length}词`, {
+      sheet_count: 1,
+      data_rows: lines.length,
+      target_count: 1,
+      unique_term_count: nextTerms.length,
+    }, [{ sheet: "粘贴列表", column: "verbatim", coding_type: "AE", non_empty_count: lines.length }]);
+    setNotice(`已载入 ${nextTerms.length} 个唯一术语，开始自动建议`);
+    await runSuggest(nextTerms);
   }
 
   function applyDecision(item: UniqueTerm, decision: Decision) {
@@ -404,7 +434,7 @@ export default function CodingWorkspace({
     setError("");
     setExporting(true);
     try {
-      const response = await fetch(`${apiBase}/api/coding/export`, {
+      const response = await fetch(`${apiBase}/coding/export`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -490,6 +520,10 @@ export default function CodingWorkspace({
             {suggesting ? <Loader2 size={16} className="spin" /> : <Search size={16} />}
             重新建议
           </button>
+          <button className="kz-btn" disabled={suggesting || !pasteText.trim() || !versionReady} onClick={() => void runPasteDryRun()}>
+            {suggesting ? <Loader2 size={16} className="spin" /> : <Check size={16} />}
+            粘贴列表干跑
+          </button>
           <button className="kz-btn" disabled={!terms.length} onClick={acceptAllExact}>
             <Check size={16} /> 批量接受精确匹配
           </button>
@@ -568,8 +602,22 @@ export default function CodingWorkspace({
           <FileSpreadsheet size={28} />
           <p>尚未导入 Data Listing</p>
           <p className="coding-empty-hint">
-            支持 MG-K10 等 EDC 导出的多 Sheet Excel。自动识别 AE·不良事件名称、MH·疾病名称、CM·用药原因、AH·过敏史详述等待编码列。
+            支持 MG-K10 等 EDC 导出的多 Sheet Excel。自动识别待编码列：AETERM（不良事件名称）、MHTERM（疾病名称）、CMINDC（用药原因）、AHDESC（过敏史详述）、ALRTERM、DSDECOD。
           </p>
+          <div className="coding-paste-box">
+            <label htmlFor="coding-paste">或直接粘贴术语列表（每行一个，用于干跑建议）</label>
+            <textarea
+              id="coding-paste"
+              value={pasteText}
+              onChange={(event) => setPasteText(event.target.value)}
+              rows={4}
+              placeholder={"头痛\n高血压\n过敏性结膜炎"}
+            />
+            <button className="kz-btn primary" disabled={suggesting || !pasteText.trim() || !versionReady} onClick={() => void runPasteDryRun()}>
+              {suggesting ? <Loader2 size={16} className="spin" /> : <Check size={16} />}
+              粘贴列表干跑
+            </button>
+          </div>
         </div>
       )}
 

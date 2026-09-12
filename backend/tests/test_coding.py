@@ -15,6 +15,16 @@ from app.coding import (
     parse_data_listing_excel,
     safe_download_filename,
 )
+from app.meddra_data import clinical_zh_expansions
+
+
+class ClinicalAliasTests(unittest.TestCase):
+    def test_allergic_conjunctivitis_maps_to_meddra_wording(self) -> None:
+        expansions = clinical_zh_expansions("过敏性结膜炎")
+        self.assertTrue(any("变应性结膜炎" in rewritten for rewritten, _ in expansions))
+
+    def test_no_false_rewrite_without_alias_fragment(self) -> None:
+        self.assertEqual(clinical_zh_expansions("高血压"), [])
 
 
 def _encode(data: bytes) -> str:

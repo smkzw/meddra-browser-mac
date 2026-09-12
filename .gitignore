@@ -29,4 +29,5 @@ prompts/
 runs/
 reviews/
 metrics/
+qa-evidence/
 .DS_Store
