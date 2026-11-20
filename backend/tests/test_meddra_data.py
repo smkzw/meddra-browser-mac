@@ -124,7 +124,7 @@ class MeddraDataTests(unittest.TestCase):
                 add_source_root(str(old_root))
                 add_source_root(str(new_root))
                 release = select_release(discover_releases(), "30.3")
-                self.assertEqual(release.english_dir, new_ascii)
+            self.assertEqual(release.english_dir, new_ascii.resolve())
 
     def test_synonym_lookup_stays_inside_selected_root(self) -> None:
         with TemporaryDirectory() as tmp:

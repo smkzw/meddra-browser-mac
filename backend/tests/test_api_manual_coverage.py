@@ -80,7 +80,7 @@ class ApiManualCoverageTests(unittest.TestCase):
 
     def test_runtime_shutdown_requires_installed_callback(self) -> None:
         missing = self.client.post("/api/runtime/shutdown", headers={"Content-Type": "application/json"}, content=b"{}")
-        self.assertEqual(missing.status_code, 400)
+        self.assertEqual(missing.status_code, 409)
         calls: list[str] = []
         app.state.request_shutdown = lambda: calls.append("stop")  # type: ignore[attr-defined]
         try:

@@ -73,11 +73,12 @@ def _origin_parts(origin: str) -> tuple[str, str, int | None] | None:
         return None
     try:
         parsed = urlparse(origin)
+        scheme, hostname, port = parsed.scheme, parsed.hostname, parsed.port
     except ValueError:
         return None
-    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+    if scheme not in {"http", "https"} or not hostname:
         return None
-    return parsed.scheme, parsed.hostname.lower(), parsed.port
+    return scheme, hostname.lower(), port
 
 
 def _is_runtime_info_path(path: str) -> bool:
@@ -89,28 +90,14 @@ def _same_authority(request: Request, origin: str) -> bool:
     if parts is None:
         return False
     scheme, hostname, port = parts
-    host_header = request.headers.get("host") or ""
-    req_host = _request_hostname(host_header)
-    if hostname != req_host:
+    if scheme != request.url.scheme or hostname != request.url.hostname:
         return False
-    # Compare ports when the Origin explicitly carries one; otherwise accept the
-    # Host header's default/current port for packaged same-origin UI.
-    if port is None:
-        return True
-    if host_header.startswith("[") and "]:" in host_header:
-        try:
-            host_port = int(host_header.rsplit("]:", 1)[1])
-        except ValueError:
-            return False
-        return port == host_port
-    if ":" in host_header and not host_header.startswith("["):
-        try:
-            host_port = int(host_header.rsplit(":", 1)[1])
-        except ValueError:
-            return False
-        return port == host_port
     default_port = 443 if scheme == "https" else 80
-    return port == default_port
+    try:
+        host_port = request.url.port
+    except ValueError:
+        return False
+    return (port if port is not None else default_port) == (host_port if host_port is not None else default_port)
 
 
 def _origin_permitted(request: Request) -> bool:
