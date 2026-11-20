@@ -101,7 +101,12 @@ def portable_url() -> str | None:
             if response.status != 200:
                 return None
             current = json.loads(response.read(4096))
-        if isinstance(current, dict) and current.get("distribution_mode") == "portable" and current.get("instance_id") == hint["instance_id"]:
+        if (
+            isinstance(current, dict)
+            and current.get("distribution_mode") == "portable"
+            and current.get("instance_id") == hint["instance_id"]
+            and current.get("shutdown_available")
+        ):
             return url
     except (OSError, ValueError, TypeError, KeyError, http.client.HTTPException):
         pass
@@ -131,12 +136,27 @@ async def serve(listener: socket.socket, instance_id: str, mode: str, ready_path
     ))
     loop = asyncio.get_running_loop()
 
+    def remove_portable_address() -> None:
+        if mode != "portable":
+            return
+        for path in (PORT_FILE, ADDRESS_FILE):
+            try:
+                path.unlink(missing_ok=True)
+            except OSError as exc:
+                print(f"无法清除便携版地址文件：{exc}", file=sys.stderr, flush=True)
+
     def request_shutdown() -> None:
+        remove_portable_address()
         server.should_exit = True
 
     # Let the response leave before shutting down the loop.
     if mode == "portable":
-        app.state.request_shutdown = lambda: loop.call_soon_threadsafe(loop.call_later, 0.2, request_shutdown)
+        def shutdown_portable() -> None:
+            app.state.request_shutdown = None
+            remove_portable_address()
+            loop.call_soon_threadsafe(loop.call_later, 0.2, request_shutdown)
+
+        app.state.request_shutdown = shutdown_portable
 
     def on_signal(_number, _frame) -> None:
         request_shutdown()

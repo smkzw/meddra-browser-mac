@@ -297,7 +297,6 @@ SKIP_DIRECTORY_NAMES = {
     "__pycache__",
     "wheelhouse",
     "qa-worktrees",
-    "meddra-browser-mac",
 }
 MAX_DICTIONARY_WALK_DEPTH = 6
 MAX_DICTIONARY_WALK_DIRS = 4000
@@ -523,6 +522,8 @@ def iter_dictionary_dirs(root: Path) -> Iterable[Path]:
         for child in children:
             try:
                 if not child.is_dir() or should_skip_directory(child.name):
+                    continue
+                if child.name.startswith("meddra-browser-mac") and (child / ".git").exists() and (child / "frontend").is_dir():
                     continue
             except (OSError, PermissionError):
                 continue

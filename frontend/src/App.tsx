@@ -800,8 +800,26 @@ export default function App() {
         const data = await readJsonResponse(response).catch(() => ({}));
         throw new Error(apiErrorMessage(data, `退出失败 (${response.status})`));
       }
-      setServiceStopped(true);
-      setStatusNotice("");
+      const deadline = Date.now() + 6000;
+      while (Date.now() < deadline) {
+        await new Promise((resolve) => window.setTimeout(resolve, 150));
+        const controller = new AbortController();
+        const timeout = window.setTimeout(() => controller.abort(), 600);
+        try {
+          const active = await fetchJson<RuntimeInfo>(
+            `${API}/runtime-info`, { cache: "no-store", signal: controller.signal }
+          );
+          if (active.instance_id === runtimeInfo?.instance_id) continue;
+        } catch (error) {
+          if ((error as Error).name === "AbortError") continue;
+        } finally {
+          window.clearTimeout(timeout);
+        }
+        setServiceStopped(true);
+        setStatusNotice("");
+        return;
+      }
+      flash("本地服务仍在退出，可在启动窗口查看状态。");
     } catch (error) {
       // If socket dropped right after server initiated exit, verify once before treating as error.
       try {
@@ -3747,14 +3765,25 @@ function detailToResult(detail: Detail): SearchResult | null {
 function readStorage<T>(key: string, fallback: T): T {
   try {
     const raw = localStorage.getItem(key);
-    return raw ? (JSON.parse(raw) as T) : fallback;
+    if (!raw) return fallback;
+    const value = JSON.parse(raw);
+    if (Array.isArray(fallback)) {
+      return Array.isArray(value) && value.every((item) => item != null && typeof item === "object")
+        ? (value as T)
+        : fallback;
+    }
+    return value && Number.isFinite(value.left) && Number.isFinite(value.right) ? (value as T) : fallback;
   } catch {
     return fallback;
   }
 }
 
 function writeStorage(key: string, value: unknown) {
-  localStorage.setItem(key, JSON.stringify(value));
+  try {
+    localStorage.setItem(key, JSON.stringify(value));
+  } catch {
+    // The current app session remains usable if the browser disables storage.
+  }
 }
 
 function parseCsv(text: string): Array<Record<string, string>> {

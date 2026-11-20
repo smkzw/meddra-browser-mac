@@ -45,5 +45,11 @@ class PortableDiscoveryTests(unittest.TestCase):
         releases = {row.version for row in discover_releases(root)}
         self.assertIn("29.0", releases)
 
+    def test_source_folder_named_like_the_app_is_discoverable(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            ascii_dir = write_fake_dictionary(root / "meddra-browser-mac")
+            self.assertIn(ascii_dir, list(iter_dictionary_dirs(root)))
+
 if __name__ == "__main__":
     unittest.main()

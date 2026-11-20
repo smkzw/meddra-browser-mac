@@ -127,6 +127,7 @@ class ApiManualCoverageTests(unittest.TestCase):
         self.assertIn("filename*=UTF-8''", disposition)
         self.assertNotIn("粘贴", disposition.split("filename*=", 1)[0])
         self.assertTrue(export.content.startswith(b"\xef\xbb\xbf"))
+        self.assertEqual(export.content.decode("utf-8-sig").splitlines()[0], "code,name")
 
     def test_search_categories_code_and_soc_filter(self) -> None:
         exact = self.client.post(

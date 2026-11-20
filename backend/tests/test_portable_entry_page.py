@@ -50,12 +50,17 @@ class PortableEntryPageTests(unittest.TestCase):
         return json.loads(result.stdout)
 
     def test_follows_only_the_matching_live_instance(self):
-        result = self.exercise(HINT, HINT)
+        result = self.exercise(HINT, dict(HINT, shutdown_available=True))
         self.assertEqual(result["visits"], ["http://127.0.0.1:49123/"])
         self.assertEqual(result["probes"], ["http://127.0.0.1:49123/api/runtime-info"])
 
     def test_stale_or_foreign_instance_does_not_navigate(self):
-        for live in (None, dict(HINT, instance_id="b" * 32), dict(HINT, distribution_mode="free_mac")):
+        for live in (
+            None,
+            dict(HINT, instance_id="b" * 32, shutdown_available=True),
+            dict(HINT, distribution_mode="free_mac", shutdown_available=True),
+            dict(HINT, shutdown_available=False),
+        ):
             result = self.exercise(HINT, live)
             self.assertEqual(result["visits"], [])
             self.assertIn("已失效", result["status"])

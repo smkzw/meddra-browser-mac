@@ -22,6 +22,7 @@ private final class MedDRAApp: NSObject, NSApplicationDelegate, NSWindowDelegate
     private var session: URL?
     private var exiting = false
     private var closing = false
+    private var workbenchError: String?
     private struct SaveJob {
         let staged: URL
         let final: URL
@@ -128,7 +129,9 @@ private final class MedDRAApp: NSObject, NSApplicationDelegate, NSWindowDelegate
     }
 
     func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
-        webView.reload()
+        if self.webView === webView, let serviceURL {
+            showWorkbench(serviceURL)
+        }
     }
 
     @objc private func showLog() {
@@ -142,6 +145,7 @@ private final class MedDRAApp: NSObject, NSApplicationDelegate, NSWindowDelegate
     @objc private func start() {
         guard server?.isRunning != true, !exiting else { return }
         cleanSession()
+        workbenchError = nil
         showStatus("正在打开 MedDRA Browser", "正在启动本机词典服务。")
         #if arch(arm64)
         let arch = "arm64"
@@ -208,16 +212,50 @@ private final class MedDRAApp: NSObject, NSApplicationDelegate, NSWindowDelegate
         }
     }
 
-    private func showWorkbench(_ url: URL) {
+    private func showWorkbench(_ url: URL, attempt: Int = 1) {
+        guard !exiting else { return }
+        webView?.configuration.userContentController.removeScriptMessageHandler(forName: "chooseDictionary")
         serviceURL = url
+        showStatus("正在打开 MedDRA Browser", "正在载入本地工作台。")
         let configuration = WKWebViewConfiguration()
         configuration.userContentController.addScriptMessageHandler(self, contentWorld: .page, name: "chooseDictionary")
-        let view = WKWebView(frame: .zero, configuration: configuration)
+        let view = WKWebView(frame: window.contentLayoutRect, configuration: configuration)
         view.navigationDelegate = self
         view.uiDelegate = self
-        window.contentView = view
         webView = view
-        view.load(URLRequest(url: url))
+        view.load(URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 8))
+        waitForWorkbench(view, url: url, attempt: attempt, deadline: .now() + .seconds(8))
+    }
+
+    private func waitForWorkbench(_ view: WKWebView, url: URL, attempt: Int, deadline: DispatchTime) {
+        guard webView === view, window.contentView !== view, !exiting else { return }
+        if DispatchTime.now() >= deadline {
+            if attempt == 1 {
+                showWorkbench(url, attempt: 2)
+            } else {
+                let message = "本地服务已启动，工作台页面加载超时。请重新启动，或查看启动日志。"
+                workbenchError = message
+                if let output = try? FileHandle(forWritingTo: log) {
+                    _ = try? output.seekToEnd()
+                    try? output.write(contentsOf: Data("\n\(message)\n".utf8))
+                    try? output.close()
+                }
+                stopServer()
+            }
+            return
+        }
+        view.evaluateJavaScript("document.getElementById('root')?.childElementCount > 0") { [weak self, weak view] value, _ in
+            guard let self, let view, self.webView === view, !self.exiting,
+                  self.workbenchError == nil, (value as? Bool) == true else { return }
+            if self.window.contentView !== view {
+                self.window.contentView = view
+            }
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(240)) { [weak self, weak view] in
+            if let view {
+                self?.waitForWorkbench(view, url: url, attempt: attempt, deadline: deadline)
+            }
+        }
     }
 
     private func cleanSession() {
@@ -237,6 +275,8 @@ private final class MedDRAApp: NSObject, NSApplicationDelegate, NSWindowDelegate
         cleanSession()
         if exiting {
             NSApp.reply(toApplicationShouldTerminate: true)
+        } else if let workbenchError {
+            showStatus("无法载入工作台", workbenchError, error: true)
         } else {
             let message = (try? String(contentsOf: log, encoding: .utf8))?
                 .split(whereSeparator: \.isNewline).last(where: { $0.hasPrefix("MedDRA Browser 启动失败") })
@@ -421,6 +461,8 @@ private final class MedDRAApp: NSObject, NSApplicationDelegate, NSWindowDelegate
             try? FileManager.default.removeItem(at: job.staged)
             reportDownload(job.requestURL, saved: false)
             presentError("导出未完成。\n\(error.localizedDescription)")
+        } else if let requestURL = download.originalRequest?.url?.absoluteString {
+            reportDownload(requestURL, saved: false)
         }
     }
 

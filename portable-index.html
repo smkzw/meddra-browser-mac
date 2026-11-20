@@ -113,7 +113,7 @@
           signal: controller.signal,
         });
         const active = response.ok ? await response.json() : null;
-        if (active?.distribution_mode === "portable" && active.instance_id === info.instance_id) {
+        if (active?.distribution_mode === "portable" && active.instance_id === info.instance_id && active.shutdown_available) {
           status.textContent = "本地服务已启动，正在打开工作台…";
           window.location.replace(url);
           return;

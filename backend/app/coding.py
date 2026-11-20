@@ -923,12 +923,8 @@ def code_to_csv(rows: list[dict[str, Any]], *, include_coding: bool = True) -> s
         "备注",
         "审阅异常原因",
     ]
-    extra_keys: list[str] = []
-    for row in rows:
-        for key in row.keys():
-            if key not in preferred and key not in extra_keys:
-                extra_keys.append(key)
-    fieldnames = preferred + extra_keys
+    keys = dict.fromkeys(key for row in rows for key in row)
+    fieldnames = [key for key in preferred if key in keys] + [key for key in keys if key not in preferred]
     if not include_coding:
         codes = {"PT代码", "PT中文", "PT英文", "LLT代码", "LLT中文", "LLT英文", "匹配方式", "匹配分"}
         fieldnames = [key for key in fieldnames if key not in codes]

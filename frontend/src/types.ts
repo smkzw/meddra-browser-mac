@@ -166,6 +166,7 @@ export interface RuntimeInfo {
   version?: string;
   app_store_mode?: boolean;
   distribution_mode?: string;
+  instance_id?: string;
   shutdown_available?: boolean;
 }
 
