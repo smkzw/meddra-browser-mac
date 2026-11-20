@@ -52,10 +52,11 @@ Mac App 沿用原版 `~/Library/Application Support/MedDRA Browser Mac/data` 中
 在浏览器打开启动窗口显示的地址。开发测试请显式设置本地已获授权词典目录和临时状态目录。
 
 ```bash
-python3 -m pip install -r backend/requirements-dev.txt
+python3 -m venv .venv
+.venv/bin/python -m pip install -r backend/requirements-dev.txt
 MEDDRA_SOURCE_ROOT="/path/to/licensed/MedDRA" \
 MEDDRA_BROWSER_STATE_DIR="$(mktemp -d)" PYTHONPATH=backend \
-  python3 -m unittest discover -s backend/tests -v
+  .venv/bin/python -m unittest discover -s backend/tests -v
 ```
 
 ```bash
