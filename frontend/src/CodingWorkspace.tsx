@@ -1,4 +1,6 @@
 import { ChangeEvent, useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
+import { openModal } from "./modal";
 import {
   AlertTriangle,
   Check,
@@ -458,15 +460,8 @@ export default function CodingWorkspace({
       window.removeEventListener("meddra:native-download-cancelled", handleNativeDownload);
     };
   }, []);
-  // Sync native <dialog> for manual recode
   useEffect(() => {
-    const dialog = recodeDialogRef.current;
-    if (!dialog) return;
-    if (recodeTarget && !dialog.open) {
-      dialog.showModal();
-    } else if (!recodeTarget && dialog.open) {
-      dialog.close();
-    }
+    if (recodeTarget) return openModal(recodeDialogRef.current, closeRecodeModal);
   }, [recodeTarget]);
 
   const effectiveVersion = boundVersion || version;
@@ -2135,11 +2130,13 @@ export default function CodingWorkspace({
         </>
       )}
 
-      {/* End-to-End Manual Recode Modal */}
-      <dialog
+      {createPortal(<dialog
         ref={recodeDialogRef}
         className="kz-dialog"
+        role="dialog"
+        aria-modal="true"
         aria-labelledby="recode-dialog-title"
+        tabIndex={-1}
         onCancel={(event) => {
           event.preventDefault();
           closeRecodeModal();
@@ -2339,7 +2336,7 @@ export default function CodingWorkspace({
             </footer>
           </div>
         )}
-      </dialog>
+      </dialog>, document.body)}
     </section>
   );
 }

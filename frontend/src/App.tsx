@@ -8,6 +8,8 @@ import {
   useRef,
   useState,
 } from "react";
+import { createPortal } from "react-dom";
+import { openModal } from "./modal";
 import {
   AlertTriangle,
   Check,
@@ -435,15 +437,8 @@ export default function App() {
     return () => window.removeEventListener("beforeunload", handleBeforeUnload);
   }, [codingState.dirty, serviceStopped]);
 
-  // Sync native <dialog> confirmation modal
   useEffect(() => {
-    const dialog = confirmDialogRef.current;
-    if (!dialog) return;
-    if (confirmDialog && !dialog.open) {
-      dialog.showModal();
-    } else if (!confirmDialog && dialog.open) {
-      dialog.close();
-    }
+    if (confirmDialog) return openModal(confirmDialogRef.current, () => setConfirmDialog(null));
   }, [confirmDialog]);
 
   useEffect(() => {
@@ -2502,11 +2497,13 @@ export default function App() {
         </aside>
       </div>
 
-      {/* Confirmation Native Dialog */}
-      <dialog
+      {createPortal(<dialog
         ref={confirmDialogRef}
         className="kz-dialog kz-confirm-dialog"
+        role="dialog"
+        aria-modal="true"
         aria-labelledby="confirm-dialog-title"
+        tabIndex={-1}
         onCancel={(event) => {
           event.preventDefault();
           setConfirmDialog(null);
@@ -2549,7 +2546,7 @@ export default function App() {
             </footer>
           </div>
         )}
-      </dialog>
+      </dialog>, document.body)}
 
       {toast && (
         <div className="toast" role="status" aria-live="polite">
