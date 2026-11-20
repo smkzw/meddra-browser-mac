@@ -16,6 +16,7 @@ private final class MedDRAApp: NSObject, NSApplicationDelegate, NSWindowDelegate
         backing: .buffered, defer: false
     )
     private var webView: WKWebView?
+    private var workbenchReady = false
     private var serviceURL: URL?
     private var server: Process?
     private var parentPipe: Pipe?
@@ -125,6 +126,7 @@ private final class MedDRAApp: NSObject, NSApplicationDelegate, NSWindowDelegate
             stack.centerYAnchor.constraint(equalTo: panel.centerYAnchor),
             stack.widthAnchor.constraint(lessThanOrEqualToConstant: 540)
         ])
+        window.contentViewController = nil
         window.contentView = panel
     }
 
@@ -216,19 +218,23 @@ private final class MedDRAApp: NSObject, NSApplicationDelegate, NSWindowDelegate
         guard !exiting else { return }
         webView?.configuration.userContentController.removeScriptMessageHandler(forName: "chooseDictionary")
         serviceURL = url
-        showStatus("正在打开 MedDRA Browser", "正在载入本地工作台。")
+        workbenchReady = false
         let configuration = WKWebViewConfiguration()
         configuration.userContentController.addScriptMessageHandler(self, contentWorld: .page, name: "chooseDictionary")
         let view = WKWebView(frame: window.contentLayoutRect, configuration: configuration)
+        view.autoresizingMask = [.width, .height]
         view.navigationDelegate = self
         view.uiDelegate = self
         webView = view
+        let controller = NSViewController()
+        controller.view = view
+        window.contentViewController = controller
         view.load(URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 8))
         waitForWorkbench(view, url: url, attempt: attempt, deadline: .now() + .seconds(8))
     }
 
     private func waitForWorkbench(_ view: WKWebView, url: URL, attempt: Int, deadline: DispatchTime) {
-        guard webView === view, window.contentView !== view, !exiting else { return }
+        guard webView === view, !workbenchReady, !exiting else { return }
         if DispatchTime.now() >= deadline {
             if attempt == 1 {
                 showWorkbench(url, attempt: 2)
@@ -244,11 +250,17 @@ private final class MedDRAApp: NSObject, NSApplicationDelegate, NSWindowDelegate
             }
             return
         }
-        view.evaluateJavaScript("document.getElementById('root')?.childElementCount > 0") { [weak self, weak view] value, _ in
+        view.evaluateJavaScript("document.readyState === 'complete' && document.getElementById('root')?.childElementCount > 0") { [weak self, weak view] value, _ in
             guard let self, let view, self.webView === view, !self.exiting,
                   self.workbenchError == nil, (value as? Bool) == true else { return }
-            if self.window.contentView !== view {
-                self.window.contentView = view
+            if !self.workbenchReady {
+                self.workbenchReady = true
+                if self.window.isVisible && !self.window.isMiniaturized {
+                    self.window.makeKeyAndOrderFront(nil)
+                }
+                self.window.makeFirstResponder(view)
+                view.needsDisplay = true
+                self.window.displayIfNeeded()
             }
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(240)) { [weak self, weak view] in
@@ -261,6 +273,7 @@ private final class MedDRAApp: NSObject, NSApplicationDelegate, NSWindowDelegate
     private func cleanSession() {
         webView?.configuration.userContentController.removeScriptMessageHandler(forName: "chooseDictionary")
         webView = nil
+        workbenchReady = false
         serviceURL = nil
         if let session {
             try? FileManager.default.removeItem(at: session)
