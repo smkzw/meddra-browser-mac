@@ -17,13 +17,7 @@ docs/no-apple-developer-program-distribution-zh.md
 - 可以扫描包内是否混入 MedDRA 词典、SQLite 缓存、`pyc` 或本机路径。
 - 可以准备 App Review Notes、隐私答复、App Store Connect 元数据。
 
-但当前架构还不是正式审核就绪：
-
-- App 仍是脚本壳启动本地 FastAPI 服务，再打开外部浏览器。
-- App 依赖系统 `python3`，虽然 Python 包已随 App vendor，但 Python 解释器本身不是自包含。
-- macOS 文件夹选择仍依赖后端 `osascript`，不符合 App Store 沙盒下的原生文件访问模型。
-- 当前 `MEDDRA_APP_STORE_MODE=1` 候选模式会禁用 AppleScript 文件夹选择，`选择词典文件夹` 会返回候选模式不可用。因此即使签名成功，这个候选包也不是可送审的可用产品，只能用于证书/上传链路联调。
-- 尚未实现安全作用域书签，因此用户选择 MedDRA 词典文件夹后的长期访问在沙盒环境中不可靠。
+GitHub 发行包使用原生窗口、WKWebView、NSOpenPanel 与内置 Python。App Store 审核候选仍需验证沙盒中 Python 子进程的签名、继承权限和文件访问。当前没有安全作用域书签或把用户授权传给沙盒子进程的实现。GitHub 包的功能验收与 Mac App Store 审核分开。
 
 因此，`scripts/build_app_store_pkg.sh` 默认不会直接生成正式审核包。若只是为了证书、App Store Connect 记录、Transporter 上传链路联调，可以显式设置：
 
@@ -53,8 +47,6 @@ sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
 把下面的 Bundle ID 换成你在 Apple Developer 里注册的值：
 
 ```bash
-cd /Users/smkzw/Documents/指导原则及临床试验规范合集/MedDRA/meddra-browser-mac
-
 APP_STORE_BUNDLE_ID=com.yourcompany.meddra-browser \
 APP_STORE_PROVISIONING_PROFILE=/path/to/profile.provisionprofile \
 ALLOW_KNOWN_APP_STORE_BLOCKERS=1 \
@@ -90,25 +82,12 @@ APP_STORE_APP_SPECIFIC_PASSWORD=xxxx-xxxx-xxxx-xxxx \
 
 不要把 Apple ID 密码写入脚本或仓库。这里使用的是 app-specific password。
 
-### 阶段 5：正式审核前必须完成的原生化改造
+### 阶段 5：沙盒和提交验证
 
-正式送审前建议完成：
-
-1. 用 Swift/AppKit 或 SwiftUI 做原生宿主窗口。
-2. 用 `WKWebView` 在 App 内显示 React 前端，而不是打开外部浏览器。
-3. 后端改成随 App 签名的本地 helper，或把查询逻辑迁移到原生/嵌入式运行时。
-4. 词典文件夹选择改为原生 `NSOpenPanel`。
-5. 保存 security-scoped bookmark，重新打开 App 后能恢复用户授予的词典目录访问。
-6. 移除 `osascript`、System Events 自动化、外部浏览器最大化逻辑。
-7. 用沙盒环境完整测试：首次选择词典、重启后加载词典、索引、搜索、Research Bin 导出。
-
-还要检查：
-
-- `embedded.provisionprofile` 已内嵌。
-- `codesign` 使用 hardened runtime。
-- `productbuild` 带时间戳。
-- 上传前用 Apple 工具做 validate。
-- App Store Connect 类别、Bundle ID、版本号与 `Info.plist` 一致。
+1. 按 Apple 要求为 Python 子进程及依赖单独签名，验证沙盒权限继承。
+2. 实现安全作用域书签及词典数据的沙盒读取流程。
+3. 用安装后的签名包验证首启、词典选择、重启、查询、导出、退出。
+4. 核对 provisioning profile、Bundle ID、版本号与 App Store Connect，再用 Apple 工具验证待提交包。
 
 ## App Store 审核说明建议
 

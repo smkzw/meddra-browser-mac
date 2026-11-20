@@ -1,506 +1,97 @@
 #!/bin/zsh
 set -eu
 
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+cd "$ROOT"
 APP_NAME="${MEDDRA_APP_NAME:-MedDRA Browser Mac}"
-APP_VERSION="${MEDDRA_APP_VERSION:-$(python3 - "${ROOT_DIR}/frontend/package.json" <<'PY'
-import json
-import sys
-from pathlib import Path
-
-print(json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))["version"])
-PY
-)}"
-APP_BUILD_NUMBER="${MEDDRA_BUILD_NUMBER:-$(git -C "${ROOT_DIR}" rev-list --count HEAD 2>/dev/null || echo 1)}"
+APP_PATH="${1:-$ROOT/build/$APP_NAME.app}"
+APP_VERSION="${MEDDRA_APP_VERSION:-$(node -p 'require("./frontend/package.json").version')}"
+APP_BUILD_NUMBER="${MEDDRA_BUILD_NUMBER:-$(git rev-list --count HEAD)}"
 BUNDLE_ID="${MEDDRA_BUNDLE_ID:-local.meddra.browser.mac}"
 APP_STORE_MODE="${MEDDRA_APP_STORE_MODE:-0}"
-APP_PATH="${1:-${ROOT_DIR}/build/${APP_NAME}.app}"
-
-if [[ "${APP_PATH}" != *.app ]]; then
-  echo "Target must end with .app: ${APP_PATH}" >&2
+if [[ "$APP_PATH" != *.app || -L "$APP_PATH" ]]; then
+  echo "Expected a regular .app destination: $APP_PATH" >&2
   exit 1
 fi
 
-APP_PARENT="$(dirname "${APP_PATH}")"
-CONTENTS_DIR="${APP_PATH}/Contents"
-MACOS_DIR="${CONTENTS_DIR}/MacOS"
-RESOURCES_DIR="${CONTENTS_DIR}/Resources"
-PAYLOAD_DIR="${RESOURCES_DIR}/app"
+if [[ "${MEDDRA_FRONTEND_PREBUILT:-0}" != 1 ]]; then
+  (cd frontend && npm run build)
+fi
 
-(cd "${ROOT_DIR}/frontend" && npm run build)
+mkdir -p "$(dirname "$APP_PATH")"
+STAGING="$(mktemp -d "$(dirname "$APP_PATH")/.meddra-app.XXXXXXXX")"
+trap 'rm -rf "$STAGING"' EXIT
+STAGED_APP="$STAGING/$APP_NAME.app"
+CONTENTS="$STAGED_APP/Contents"
+PAYLOAD="$CONTENTS/Resources/app"
+mkdir -p "$CONTENTS/MacOS"
+scripts/copy_bundle_payload.sh "$PAYLOAD"
+python3 scripts/build_runtime.py "$PAYLOAD/tools/python" macos-arm64 macos-x86_64
 
-rm -rf "${APP_PATH}"
-mkdir -p "${MACOS_DIR}" "${RESOURCES_DIR}" "${PAYLOAD_DIR}/backend" "${PAYLOAD_DIR}/frontend" "${PAYLOAD_DIR}/vendor"
+xcrun swiftc -swift-version 5 -O -target arm64-apple-macosx12.0 mac/MedDRAApp.swift -o "$STAGING/arm64"
+xcrun swiftc -swift-version 5 -O -target x86_64-apple-macosx12.0 mac/MedDRAApp.swift -o "$STAGING/x86_64"
+xcrun lipo -create "$STAGING/arm64" "$STAGING/x86_64" -output "$CONTENTS/MacOS/MedDRA"
 
-cp -R "${ROOT_DIR}/backend/app" "${PAYLOAD_DIR}/backend/app"
-cp "${ROOT_DIR}/backend/requirements.txt" "${PAYLOAD_DIR}/backend/requirements.txt"
-cp -R "${ROOT_DIR}/frontend/dist" "${PAYLOAD_DIR}/frontend/dist"
-
-find "${PAYLOAD_DIR}" -name "__pycache__" -type d -prune -exec rm -rf {} +
-find "${PAYLOAD_DIR}" -name "*.pyc" -delete
-
-python3 - "${PAYLOAD_DIR}/vendor" <<'PY'
-from __future__ import annotations
-
-import importlib.metadata as metadata
-import platform
-import re
-import shutil
+python3 - "$CONTENTS/Info.plist" "$APP_NAME" "$APP_VERSION" "$APP_BUILD_NUMBER" "$BUNDLE_ID" "$APP_STORE_MODE" <<'PY'
+import plistlib
 import sys
 from pathlib import Path
-from packaging.requirements import Requirement
 
-vendor = Path(sys.argv[1])
-roots = ["fastapi", "uvicorn", "openpyxl"]
-seen: set[str] = set()
-queue = list(roots)
-
-def normalized(name: str) -> str:
-    return re.sub(r"[-_.]+", "-", name).lower()
-
-while queue:
-    name = queue.pop(0)
-    key = normalized(name)
-    if key in seen:
-        continue
-    try:
-        dist = metadata.distribution(name)
-    except metadata.PackageNotFoundError as exc:
-        raise SystemExit(f"Required Python package is not installed: {name}") from exc
-    seen.add(normalized(dist.metadata["Name"]))
-    for requirement in dist.requires or []:
-        parsed = Requirement(requirement)
-        if parsed.marker and not parsed.marker.evaluate():
-            continue
-        dep = parsed.name
-        if normalized(dep) not in seen:
-            queue.append(dep)
-
-for key in sorted(seen):
-    dist = metadata.distribution(key)
-    for item in dist.files or []:
-        if item.is_absolute() or ".." in item.parts or "__pycache__" in item.parts:
-            continue
-        source = Path(dist.locate_file(item))
-        if not source.exists() or source.is_dir() or source.suffix == ".pyc":
-            continue
-        target = vendor / item
-        target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(source, target)
-
-(vendor / ".python-version").write_text(f"{sys.version_info.major}.{sys.version_info.minor}\n", encoding="utf-8")
-(vendor / ".python-arch").write_text(f"{platform.machine()}\n", encoding="utf-8")
-for record in vendor.glob("*.dist-info/RECORD"):
-    try:
-        lines = record.read_text(encoding="utf-8").splitlines()
-    except UnicodeDecodeError:
-        continue
-    clean = [
-        line
-        for line in lines
-        if "/Users/" not in line
-        and "\\Users\\" not in line
-        and ".pyc" not in line
-        and "Caches/com.apple.python" not in line
-    ]
-    record.write_text("\n".join(clean) + ("\n" if clean else ""), encoding="utf-8")
-for direct_url in vendor.glob("*.dist-info/direct_url.json"):
-    direct_url.unlink()
-print(f"Vendored {len(seen)} Python distributions into {vendor}")
+path, name, version, build, bundle_id, store_mode = sys.argv[1:]
+Path(path).write_bytes(plistlib.dumps({
+    "CFBundleName": name,
+    "CFBundleDisplayName": name,
+    "CFBundleExecutable": "MedDRA",
+    "CFBundleIdentifier": bundle_id,
+    "CFBundleIconFile": "AppIcon",
+    "CFBundlePackageType": "APPL",
+    "CFBundleShortVersionString": version,
+    "CFBundleVersion": build,
+    "CFBundleDevelopmentRegion": "zh_CN",
+    "LSApplicationCategoryType": "public.app-category.medical",
+    "LSMinimumSystemVersion": "12.0",
+    "NSHighResolutionCapable": True,
+    "NSDocumentsFolderUsageDescription": "读取你选择的 MedDRA 词典和待编码文件。",
+    "NSDownloadsFolderUsageDescription": "读取你选择的词典或保存导出的文件。",
+    "MedDRAAppStoreCandidate": store_mode == "1",
+}))
 PY
 
-cat > "${CONTENTS_DIR}/Info.plist" <<PLIST
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-  <key>CFBundleDevelopmentRegion</key>
-  <string>zh_CN</string>
-  <key>CFBundleExecutable</key>
-  <string>${APP_NAME}</string>
-  <key>CFBundleIdentifier</key>
-  <string>${BUNDLE_ID}</string>
-  <key>CFBundleName</key>
-  <string>${APP_NAME}</string>
-  <key>CFBundleDisplayName</key>
-  <string>${APP_NAME}</string>
-  <key>CFBundleIconFile</key>
-  <string>AppIcon</string>
-  <key>CFBundlePackageType</key>
-  <string>APPL</string>
-  <key>CFBundleShortVersionString</key>
-  <string>${APP_VERSION}</string>
-  <key>CFBundleVersion</key>
-  <string>${APP_BUILD_NUMBER}</string>
-  <key>LSApplicationCategoryType</key>
-  <string>public.app-category.medical</string>
-  <key>LSMinimumSystemVersion</key>
-  <string>12.0</string>
-  <key>NSLocalNetworkUsageDescription</key>
-  <string>MedDRA Browser uses a local-only service on 127.0.0.1 to search user-selected MedDRA dictionary files.</string>
-  <key>NSHighResolutionCapable</key>
-  <true/>
-</dict>
-</plist>
-PLIST
-
-cp "${ROOT_DIR}/frontend/public/brand/app-icon-512.png" "${RESOURCES_DIR}/AppIcon.png"
-ICON_TMP="$(mktemp -d)"
-ICONSET="${ICON_TMP}/AppIcon.iconset"
-mkdir -p "${ICONSET}"
-for item in \
-  "16 icon_16x16.png" \
-  "32 icon_16x16@2x.png" \
-  "32 icon_32x32.png" \
-  "64 icon_32x32@2x.png" \
-  "128 icon_128x128.png" \
-  "256 icon_128x128@2x.png" \
-  "256 icon_256x256.png" \
-  "512 icon_256x256@2x.png" \
-  "512 icon_512x512.png" \
-  "1024 icon_512x512@2x.png"; do
-  size="${item%% *}"
-  name="${item#* }"
-  sips -z "${size}" "${size}" "${ROOT_DIR}/frontend/public/brand/app-icon-512.png" --out "${ICONSET}/${name}" >/dev/null
+ICONSET="$STAGING/AppIcon.iconset"
+mkdir -p "$ICONSET"
+for size in 16 32 128 256 512; do
+  sips -z "$size" "$size" frontend/public/brand/app-icon-1024.png --out "$ICONSET/icon_${size}x${size}.png" >/dev/null
+  sips -z "$((size * 2))" "$((size * 2))" frontend/public/brand/app-icon-1024.png --out "$ICONSET/icon_${size}x${size}@2x.png" >/dev/null
 done
-iconutil -c icns "${ICONSET}" -o "${RESOURCES_DIR}/AppIcon.icns"
-rm -rf "${ICON_TMP}"
+iconutil -c icns "$ICONSET" -o "$CONTENTS/Resources/AppIcon.icns"
 
-cat > "${MACOS_DIR}/${APP_NAME}" <<'LAUNCHER'
-#!/bin/zsh
-set -u
+# Sign the executable, runtime and libraries with local ad hoc signatures.
+# Developer ID signing and notarization are separate distribution steps.
+python3 - "$PAYLOAD/tools/python" <<'PY'
+from pathlib import Path
+import subprocess
+import sys
 
-APP_CONTENTS_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-APP_ROOT="${APP_CONTENTS_DIR}/Resources/app"
-SUPPORT_DIR="${HOME}/Library/Application Support/MedDRA Browser Mac"
-DATA_DIR="${SUPPORT_DIR}/data"
-LOG_DIR="${HOME}/Library/Logs/MedDRA Browser Mac"
-SERVER_LOG="${LOG_DIR}/server.log"
-PID_FILE="${SUPPORT_DIR}/server.pid"
-VENDOR_DIR="${APP_ROOT}/vendor"
-HOST="127.0.0.1"
-REQUESTED_PORT="${MEDDRA_BROWSER_PORT:-8765}"
-PORT="${REQUESTED_PORT}"
-PORT_SCAN_LIMIT="${MEDDRA_BROWSER_PORT_SCAN_LIMIT:-20}"
-URL="http://${HOST}:${PORT}/"
-APP_STORE_MODE="__MEDDRA_APP_STORE_MODE__"
+magic = {b"\xcf\xfa\xed\xfe", b"\xce\xfa\xed\xfe", b"\xca\xfe\xba\xbe"}
+for path in Path(sys.argv[1]).rglob("*"):
+    if not path.is_file():
+        continue
+    with path.open("rb") as stream:
+        if stream.read(4) not in magic:
+            continue
+    subprocess.run(["codesign", "--force", "--sign", "-", str(path)], check=True, capture_output=True)
+PY
+codesign --force --sign - "$STAGED_APP"
+codesign --verify --deep --strict "$STAGED_APP"
 
-mkdir -p "${DATA_DIR}" "${LOG_DIR}"
-touch "${SERVER_LOG}"
-
-notify() {
-  if [ "${APP_STORE_MODE}" = "1" ]; then
-    echo "$1" >> "${SERVER_LOG}"
-  else
-    osascript -e "display notification \"$1\" with title \"MedDRA Browser Mac\"" >/dev/null 2>&1 || true
-  fi
-}
-
-fail() {
-  echo "$1" >> "${SERVER_LOG}"
-  if [ "${APP_STORE_MODE}" != "1" ]; then
-    osascript -e "display dialog \"$1\" buttons {\"OK\"} default button \"OK\" with title \"MedDRA Browser Mac\"" >/dev/null 2>&1 || true
-    open "${SERVER_LOG}" >/dev/null 2>&1 || true
+# A failed build leaves any previously installed app in place.
+if [[ -e "$APP_PATH" ]]; then
+  mv "$APP_PATH" "$STAGING/previous.app"
+fi
+if ! mv "$STAGED_APP" "$APP_PATH"; then
+  if [[ -e "$STAGING/previous.app" ]]; then
+    mv "$STAGING/previous.app" "$APP_PATH"
   fi
   exit 1
-}
-
-runtime_http_code() {
-  local candidate="$1"
-  local code
-  code="$(curl -sS --max-time 1 -o /dev/null -w "%{http_code}" "http://${HOST}:${candidate}/api/runtime-info" 2>/dev/null)" || code="000"
-  print -r -- "${code}"
-}
-
-runtime_payload() {
-  local candidate="$1"
-  curl -sS --max-time 1 "http://${HOST}:${candidate}/api/runtime-info" 2>/dev/null || true
-}
-
-matching_runtime() {
-  local payload="$1"
-  print -r -- "${payload}" | grep -Eq '"app_name"[[:space:]]*:[[:space:]]*"MedDRA Browser"' || return 1
-  if [ "${APP_STORE_MODE}" = "1" ]; then
-    print -r -- "${payload}" | grep -Eq '"app_store_mode"[[:space:]]*:[[:space:]]*true'
-  else
-    print -r -- "${payload}" | grep -Eq '"app_store_mode"[[:space:]]*:[[:space:]]*false'
-  fi
-}
-
-REUSE_EXISTING_SERVER=0
-select_port() {
-  local candidate code payload
-  for (( candidate = REQUESTED_PORT; candidate < REQUESTED_PORT + PORT_SCAN_LIMIT; candidate++ )); do
-    code="$(runtime_http_code "${candidate}")"
-    if [ "${code}" = "000" ]; then
-      PORT="${candidate}"
-      URL="http://${HOST}:${PORT}/"
-      return 0
-    fi
-    if [ "${code}" = "200" ]; then
-      payload="$(runtime_payload "${candidate}")"
-      if matching_runtime "${payload}"; then
-        PORT="${candidate}"
-        URL="http://${HOST}:${PORT}/"
-        REUSE_EXISTING_SERVER=1
-        return 0
-      fi
-    fi
-  done
-  fail "本地服务端口 ${REQUESTED_PORT}-$((REQUESTED_PORT + PORT_SCAN_LIMIT - 1)) 都已被占用，请关闭占用端口的程序后重试。"
-}
-
-if ! command -v python3 >/dev/null 2>&1; then
-  fail "未找到 python3。请先安装 Python 3.9 或更新版本，然后重新打开 App。"
 fi
-
-VENDOR_PY="$(cat "${VENDOR_DIR}/.python-version" 2>/dev/null || true)"
-VENDOR_ARCH="$(cat "${VENDOR_DIR}/.python-arch" 2>/dev/null || true)"
-typeset -a PYTHON_CMD
-PYTHON_CMD=(python3)
-
-if [ "$(sysctl -in hw.optional.arm64 2>/dev/null || echo 0)" = "1" ]; then
-  if [ "${VENDOR_ARCH}" = "arm64" ]; then
-    PYTHON_CMD=(/usr/bin/arch -arm64 python3)
-  elif [ "${VENDOR_ARCH}" = "x86_64" ]; then
-    PYTHON_CMD=(/usr/bin/arch -x86_64 python3)
-  fi
-fi
-
-RUNTIME_INFO="$("${PYTHON_CMD[@]}" - <<'PY'
-import platform
-import sys
-print(f"{sys.version_info.major}.{sys.version_info.minor}|{platform.machine()}")
-PY
-)"
-RUNTIME_PY="${RUNTIME_INFO%%|*}"
-RUNTIME_ARCH="${RUNTIME_INFO#*|}"
-if [ "${RUNTIME_PY}" != "${VENDOR_PY}" ] || [ "${RUNTIME_ARCH}" != "${VENDOR_ARCH}" ]; then
-  fail "当前 python3 为 ${RUNTIME_PY}/${RUNTIME_ARCH}，但此 App 内置依赖为 ${VENDOR_PY}/${VENDOR_ARCH}。请用当前机器重新运行 scripts/build_macos_app.sh 构建 App。"
-fi
-
-echo "[$(date '+%Y-%m-%d %H:%M:%S')] python=${PYTHON_CMD[*]} runtime=${RUNTIME_PY}/${RUNTIME_ARCH} vendor=${VENDOR_PY}/${VENDOR_ARCH}" >> "${SERVER_LOG}"
-
-export MEDDRA_BROWSER_STATE_DIR="${DATA_DIR}"
-export MEDDRA_APP_STORE_MODE="${APP_STORE_MODE}"
-if [ "${APP_STORE_MODE}" = "1" ]; then
-  export MEDDRA_DISTRIBUTION_MODE="app_store_candidate"
-else
-  export MEDDRA_DISTRIBUTION_MODE="free_mac"
-fi
-export PYTHONPATH="${VENDOR_DIR}:${APP_ROOT}/backend"
-
-select_port
-if [ "${PORT}" != "${REQUESTED_PORT}" ]; then
-  echo "[$(date '+%Y-%m-%d %H:%M:%S')] 默认端口 ${REQUESTED_PORT} 已被占用，改用 ${PORT}" >> "${SERVER_LOG}"
-fi
-
-if [ "${REUSE_EXISTING_SERVER}" != "1" ]; then
-  notify "正在启动本地 MedDRA Browser 服务..."
-  (
-    cd "${APP_ROOT}"
-    nohup "${PYTHON_CMD[@]}" -m uvicorn app.main:app --host "${HOST}" --port "${PORT}" >> "${SERVER_LOG}" 2>&1 &
-    echo "$!" > "${PID_FILE}"
-  )
-fi
-
-for _ in {1..90}; do
-  if matching_runtime "$(runtime_payload "${PORT}")"; then
-    break
-  fi
-  sleep 1
-done
-
-if ! matching_runtime "$(runtime_payload "${PORT}")"; then
-  fail "本地服务启动失败。日志会自动打开。"
-fi
-
-if [ "${MEDDRA_BROWSER_OPEN:-1}" = "0" ]; then
-  exit 0
-fi
-
-maximize_browser_window() {
-  local app_name="$1"
-  (
-    sleep 1.2
-    osascript <<OSA
-tell application "System Events"
-  if exists process "${app_name}" then
-    tell process "${app_name}"
-      set frontmost to true
-      repeat 20 times
-        if (count of windows) > 0 then exit repeat
-        delay 0.2
-      end repeat
-      if (count of windows) > 0 then
-        try
-          set zoomed of window 1 to true
-        on error
-          try
-            tell application "Finder" to set desktopBounds to bounds of window of desktop
-            set {leftEdge, topEdge, rightEdge, bottomEdge} to desktopBounds
-            set position of window 1 to {leftEdge + 20, topEdge + 40}
-            set size of window 1 to {(rightEdge - leftEdge) - 40, (bottomEdge - topEdge) - 80}
-          end try
-        end try
-      end if
-    end tell
-  end if
-end tell
-OSA
-  ) >/dev/null 2>&1 &!
-}
-
-if [ "${APP_STORE_MODE}" = "1" ]; then
-  open "${URL}"
-elif [ -d "/Applications/Microsoft Edge.app" ]; then
-  open -na "Microsoft Edge" --args --start-maximized --app="${URL}"
-  maximize_browser_window "Microsoft Edge"
-elif [ -d "/Applications/Google Chrome.app" ]; then
-  open -na "Google Chrome" --args --start-maximized --app="${URL}"
-  maximize_browser_window "Google Chrome"
-else
-  open "${URL}"
-fi
-LAUNCHER
-
-if [ "${APP_STORE_MODE}" = "1" ]; then
-cat > "${MACOS_DIR}/${APP_NAME}" <<'APPSTORE_LAUNCHER'
-#!/bin/zsh
-set -u
-
-APP_CONTENTS_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-APP_ROOT="${APP_CONTENTS_DIR}/Resources/app"
-SUPPORT_DIR="${HOME}/Library/Application Support/MedDRA Browser Mac"
-DATA_DIR="${SUPPORT_DIR}/data"
-LOG_DIR="${HOME}/Library/Logs/MedDRA Browser Mac"
-SERVER_LOG="${LOG_DIR}/server.log"
-PID_FILE="${SUPPORT_DIR}/server.pid"
-VENDOR_DIR="${APP_ROOT}/vendor"
-HOST="127.0.0.1"
-REQUESTED_PORT="${MEDDRA_BROWSER_PORT:-8765}"
-PORT="${REQUESTED_PORT}"
-PORT_SCAN_LIMIT="${MEDDRA_BROWSER_PORT_SCAN_LIMIT:-20}"
-URL="http://${HOST}:${PORT}/"
-APP_STORE_MODE="1"
-
-mkdir -p "${DATA_DIR}" "${LOG_DIR}"
-touch "${SERVER_LOG}"
-
-fail() {
-  echo "$1" >> "${SERVER_LOG}"
-  exit 1
-}
-
-runtime_http_code() {
-  local candidate="$1"
-  local code
-  code="$(curl -sS --max-time 1 -o /dev/null -w "%{http_code}" "http://${HOST}:${candidate}/api/runtime-info" 2>/dev/null)" || code="000"
-  print -r -- "${code}"
-}
-
-runtime_payload() {
-  local candidate="$1"
-  curl -sS --max-time 1 "http://${HOST}:${candidate}/api/runtime-info" 2>/dev/null || true
-}
-
-matching_runtime() {
-  local payload="$1"
-  print -r -- "${payload}" | grep -Eq '"app_name"[[:space:]]*:[[:space:]]*"MedDRA Browser"' || return 1
-  print -r -- "${payload}" | grep -Eq '"app_store_mode"[[:space:]]*:[[:space:]]*true'
-}
-
-REUSE_EXISTING_SERVER=0
-select_port() {
-  local candidate code payload
-  for (( candidate = REQUESTED_PORT; candidate < REQUESTED_PORT + PORT_SCAN_LIMIT; candidate++ )); do
-    code="$(runtime_http_code "${candidate}")"
-    if [ "${code}" = "000" ]; then
-      PORT="${candidate}"
-      URL="http://${HOST}:${PORT}/"
-      return 0
-    fi
-    if [ "${code}" = "200" ]; then
-      payload="$(runtime_payload "${candidate}")"
-      if matching_runtime "${payload}"; then
-        PORT="${candidate}"
-        URL="http://${HOST}:${PORT}/"
-        REUSE_EXISTING_SERVER=1
-        return 0
-      fi
-    fi
-  done
-  fail "本地服务端口 ${REQUESTED_PORT}-$((REQUESTED_PORT + PORT_SCAN_LIMIT - 1)) 都已被占用，请关闭占用端口的程序后重试。"
-}
-
-if ! command -v python3 >/dev/null 2>&1; then
-  fail "未找到 python3。App Store正式版需要改为自包含运行时后再提交审核。"
-fi
-
-VENDOR_PY="$(cat "${VENDOR_DIR}/.python-version" 2>/dev/null || true)"
-VENDOR_ARCH="$(cat "${VENDOR_DIR}/.python-arch" 2>/dev/null || true)"
-typeset -a PYTHON_CMD
-PYTHON_CMD=(python3)
-
-if [ "$(sysctl -in hw.optional.arm64 2>/dev/null || echo 0)" = "1" ]; then
-  if [ "${VENDOR_ARCH}" = "arm64" ]; then
-    PYTHON_CMD=(/usr/bin/arch -arm64 python3)
-  elif [ "${VENDOR_ARCH}" = "x86_64" ]; then
-    PYTHON_CMD=(/usr/bin/arch -x86_64 python3)
-  fi
-fi
-
-RUNTIME_INFO="$("${PYTHON_CMD[@]}" - <<'PY'
-import platform
-import sys
-print(f"{sys.version_info.major}.{sys.version_info.minor}|{platform.machine()}")
-PY
-)"
-RUNTIME_PY="${RUNTIME_INFO%%|*}"
-RUNTIME_ARCH="${RUNTIME_INFO#*|}"
-if [ "${RUNTIME_PY}" != "${VENDOR_PY}" ] || [ "${RUNTIME_ARCH}" != "${VENDOR_ARCH}" ]; then
-  fail "当前 python3 为 ${RUNTIME_PY}/${RUNTIME_ARCH}，但此 App 内置依赖为 ${VENDOR_PY}/${VENDOR_ARCH}。"
-fi
-
-echo "[$(date '+%Y-%m-%d %H:%M:%S')] app_store_candidate=1 runtime=${RUNTIME_PY}/${RUNTIME_ARCH} vendor=${VENDOR_PY}/${VENDOR_ARCH}" >> "${SERVER_LOG}"
-
-export MEDDRA_BROWSER_STATE_DIR="${DATA_DIR}"
-export MEDDRA_APP_STORE_MODE="1"
-export MEDDRA_DISTRIBUTION_MODE="app_store_candidate"
-export PYTHONPATH="${VENDOR_DIR}:${APP_ROOT}/backend"
-
-select_port
-if [ "${REUSE_EXISTING_SERVER}" != "1" ]; then
-  (
-    cd "${APP_ROOT}"
-    nohup "${PYTHON_CMD[@]}" -m uvicorn app.main:app --host "${HOST}" --port "${PORT}" >> "${SERVER_LOG}" 2>&1 &
-    echo "$!" > "${PID_FILE}"
-  )
-fi
-
-for _ in {1..90}; do
-  if matching_runtime "$(runtime_payload "${PORT}")"; then
-    break
-  fi
-  sleep 1
-done
-
-if ! matching_runtime "$(runtime_payload "${PORT}")"; then
-  fail "本地服务启动失败。"
-fi
-
-if [ "${MEDDRA_BROWSER_OPEN:-1}" = "0" ]; then
-  exit 0
-fi
-
-open "${URL}"
-APPSTORE_LAUNCHER
-fi
-
-perl -0pi -e "s/__MEDDRA_APP_STORE_MODE__/${APP_STORE_MODE}/g" "${MACOS_DIR}/${APP_NAME}"
-chmod +x "${MACOS_DIR}/${APP_NAME}"
-xattr -cr "${APP_PATH}" >/dev/null 2>&1 || true
-
-mkdir -p "${APP_PARENT}"
-echo "${APP_PATH}"
+echo "$APP_PATH"

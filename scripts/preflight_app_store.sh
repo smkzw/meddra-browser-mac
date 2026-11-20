@@ -78,9 +78,7 @@ else
   add_warning "尚未构建 App：${APP_PATH}"
 fi
 
-if grep -RIn 'osascript\\|System Events\\|open -na \"Microsoft Edge\"\\|open -na \"Google Chrome\"\\|command -v python3\\|uvicorn app.main:app' "${ROOT_DIR}/scripts/build_macos_app.sh" "${ROOT_DIR}/backend/app/main.py" >/tmp/meddra_app_store_arch_hits.txt 2>/dev/null; then
-  add_warning "当前 Mac App 仍是脚本壳/本地服务架构。正式审核前建议改为原生 WebView + 原生文件夹选择器 + 安全作用域书签。详见 docs/app-store/APP_STORE_SUBMISSION_ZH.md。"
-fi
+add_warning "App Store 候选需要验证 Python 子进程的沙盒权限、嵌套签名和词典目录书签。详见 docs/app-store/APP_STORE_SUBMISSION_ZH.md。"
 
 if [[ "${ALLOW_BLOCKERS}" != "1" ]]; then
   add_failure "当前仓库仍存在 App Store 审核阻断项。若只是生成候选包用于账号/证书联调，请设置 ALLOW_KNOWN_APP_STORE_BLOCKERS=1。"

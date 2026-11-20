@@ -31,3 +31,4 @@ reviews/
 metrics/
 qa-evidence/
 .DS_Store
+.meddra-portable.lock

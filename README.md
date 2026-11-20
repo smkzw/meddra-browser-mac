@@ -1,182 +1,69 @@
 # MedDRA Browser
 
-![MedDRA Browser logo](frontend/public/brand/app-icon-256.png)
+![MedDRA Browser](frontend/public/brand/app-icon-256.png)
 
-这是一个本地运行的 MedDRA 浏览器与医学编码辅助工具。界面是中文，可以查中文、英文或双语词典，也可以导入 Data Listing 做批量编码审阅。词典文件只在你自己的电脑上读取，不会上传。
+在本机浏览 MedDRA 术语、层级和 SMQ，也可导入 Data Listing 做批量编码审阅。界面为中文，可按已导入版本切换中文、英文和双语。应用不含 MedDRA 词典，使用前请准备自己有权使用的 ASCII 发行文件夹。
 
-本项目不包含 MedDRA 词典数据。请使用你有权使用的 MedDRA 词典文件夹。
+## 下载与打开
 
-> 自动编码结果仅供编码员定位候选术语，**不能替代医学编码员终审**。所有 PT/LLT 需人工确认后导出。
+在 [GitHub Releases](https://github.com/smkzw/meddra-browser-mac/releases) 下载完整压缩包，解压后再打开。
 
-## 我该下载哪个文件
+| 下载 | 适用系统 | 打开方式 |
+| --- | --- | --- |
+| `meddra-browser-mac-app.zip` | macOS 12 及以上，Apple 芯片或 Intel | 将应用拖到「应用程序」，双击打开 |
+| `meddra-browser-portable.zip` | macOS 12 及以上，64 位 Windows 10/11 | 解压到可写目录，双击该系统的第一步文件 |
 
-在 GitHub Release 里提供两个压缩包：
+两个包都自带 Python 和运行依赖。安装和首次启动可以离线。Mac App 在自己的窗口内运行。便携版启动窗口显示地址后会自动打开浏览器。若浏览器没有打开，可打开同目录的第二步 HTML，或把启动窗口显示的地址复制到浏览器。
 
-- `meddra-browser-mac-app.zip`：Mac 用户优先用这个。
-- `meddra-browser-portable.zip`：Windows 和 Mac 都能用。适合不想安装 App，或想放在 U 盘、移动硬盘里用。
+Mac 包采用本地签名。首次打开如果出现开发者验证提示，请先确认来源和 Releases 中的 `SHA256SUMS.txt`。设备策略允许时，可在「系统设置 → 隐私与安全性」处理本次打开授权。操作路径见 [Apple 支持](https://support.apple.com/zh-cn/102445)。
 
-Windows 完整版就是 `meddra-browser-portable.zip`，包内已经带 Windows x64 Python 运行环境和离线依赖，不再单独维护功能重复的第二个 Windows 包。
+## 首次导入词典
 
-如果暂时没有 Apple Developer Program，不影响使用上面这些包。它们不能上架 Mac App Store，也没有 Apple 公证；Mac 首次打开时可能需要右键选择“打开”。详细说明见 `docs/no-apple-developer-program-distribution-zh.md`。
+1. 在工作台点「选择词典文件夹」。也可从「设置」进入。
+2. 选择包含 `soc.asc`、`pt.asc`、`llt.asc`、`mdhier.asc` 等文件的目录，或者包含多个语言、版本词典的上级文件夹。完整的 `MedAscii`、`ascii-291` 及其发行包外层目录均可。
+3. 选择版本并等待索引完成。界面会显示当前版本的语言与索引状态。添加另一种语言后，可以更新到同版双语索引。
+4. 词典路径和索引会留在本机。移走原文件夹、切换系统或便携包换电脑后，应在「设置」重新选择可访问的词典路径。
 
-## Mac App 用法
+Mac App 沿用原版 `~/Library/Application Support/MedDRA Browser Mac/data` 中的词典路径配置。便携版将配置与缓存保存在解压目录的 `backend/data`。
 
-1. 下载 `meddra-browser-mac-app.zip`，解压。
-2. 把 `MedDRA Browser Mac.app` 拖到“应用程序”。
-3. 双击打开。第一次如果被系统拦截，请右键点 App，选择“打开”。
-4. 打开后建议把窗口最大化。
-5. 如果系统提示还没有词典，点“设置”里的“选择词典文件夹”。
-6. 在 Finder 里选你的 MedDRA 文件夹。可以选 `MedDRA_29_0_Chinese`、`MedDRA_29_0_English`、`MedAscii`、`ascii-290`，也可以选它们的上级文件夹。系统会自己往下找。
+## 查询与编码审阅
 
-选好后就可以搜索。以后再打开 App，一般不用重新选择。
+- 搜索支持中文、英文、代码、层级与 SOC 筛选。可展开 SOC 至 LLT 的层级路径，浏览 SMQ 父子关系及期望的范围标签。
+- 将条目加入 Research Bin 后，可导出 CSV 或 JSON。
+- 在「批量编码」导入 CSV、XLSX Data Listing，或粘贴待编码术语。逐条核对当前词典的候选和原始术语，确认或改码后导出。编码时建议和人工决定分开，导出包含词典版本与来源行定位。
+- 编码工作在本机处理。自动建议仅供定位候选，所有编码决定须人工核对。离开电脑前请导出要保留的审阅结果。
 
-## 便携版用法
+## 关闭、退出与更新
 
-解压 `meddra-browser-portable.zip`。里面会看到这些入口文件：
+- **Mac App**。关闭工作台窗口或按 `⌘Q` 可退出 App 和它启动的本地服务。
+- **便携版**。工作完成后点击「退出便携版」，或在启动窗口按 `Ctrl+C`。只关浏览器标签页时服务仍在，重新运行第一步可打开已有会话。
+- **重启**。Mac App 启动故障时在窗口中选择「重新启动」或「查看启动日志」。便携版若连不上，检查启动窗口是否报错，再从第一步启动。
+- **更新**。退出后替换 Mac App。便携新版应解压到新目录，首次使用重新选择词典。旧工作中的导出文件请单独保留。
 
-- `【Windows】第一步：请双击我运行.bat`
-- `【Mac】第一步：请双击我运行.command`
-- `第二步：双击我开始MedDRA浏览.html`
-- `请先看我.txt`
+## 构建与测试
 
-Windows：
-
-1. 双击 `【Windows】第一步：请双击我运行.bat`。
-2. 等黑色窗口准备运行环境并启动服务。第一次运行会在本文件夹下准备 `.python_windows` 和 `.venv_windows`，不需要你单独安装 Python，也不会把 Python 加到系统 PATH。
-3. 服务启动后会自动打开本地浏览器页面。如果没有自动打开，再双击 `第二步：双击我开始MedDRA浏览.html`。第一步会在同目录写下 `portable-active-port.js` 和 `当前服务地址.txt`，第二步按实际端口打开，不依赖浏览器是否允许 `file://` 页面探测本机端口。
-4. 进入页面后，点“设置”里的“选择词典文件夹”，选择你的 MedDRA 文件夹。
-
-Mac：
-
-1. 双击 `【Mac】第一步：请双击我运行.command`。
-2. 等终端窗口准备运行环境并启动服务。第一次运行可能会安装依赖，时间会久一点。
-3. 服务启动后会自动打开本地浏览器页面。如果没有自动打开，再双击 `第二步：双击我开始MedDRA浏览.html`。第一步同样会写下当前端口，第二步会按该地址打开。
-4. 进入页面后，点“设置”里的“选择词典文件夹”，选择你的 MedDRA 文件夹。
-
-便携版打开后会在浏览器里运行。使用时不要急着关闭第一步打开的命令窗口；不用了再关。
-
-便携版不会使用 App Store 沙盒模式。如果电脑上已经打开了 App Store 候选版、Mac 桌面 App 或其他占用 8765 的程序，便携启动器会识别到错误服务并自动改用其他本地端口，不会复用它。第二步入口只会进入 `distribution_mode=portable` 且非沙盒的服务。
-
-## 选择哪个词典文件夹
-
-不用选某一个文件。选文件夹就行。
-
-能选的例子：
-
-- `MedDRA_29_0_Chinese`
-- `MedDRA_29_0_English`
-- `MedAscii`
-- `ascii-290`
-- 放着这些文件夹的上一级目录
-
-正常的 MedDRA ASCII 文件夹里通常能看到这些文件：
-
-```text
-soc.asc
-hlgt.asc
-hlt.asc
-pt.asc
-llt.asc
-mdhier.asc
-hlt_pt.asc
-hlgt_hlt.asc
-soc_hlgt.asc
-smq_list.asc
-smq_content.asc
-```
-
-如果你不确定选哪一个，就选更上一级的文件夹。系统会递归查找。
-
-## 常用功能
-
-- 输入 AE/MH 名称或代码搜索术语。
-- 默认搜索 PT，也可以勾选 LLT、HLT、HLGT、SOC、SMQ。
-- 点击结果后，右侧会显示父级和子级关系树。
-- 可以把条目加入 Research Bin，再导出。
-- 可以切换中文、英文、双语显示。
-- **批量编码 / Data Listing 审阅**：导入 EDC 导出的多 Sheet Excel（xlsx）或 CSV，自动识别 `AETERM`/`MHTERM`/`CMINDC`/`AHDESC`/`ALRTERM`/`DSDECOD` 等待编码列；按唯一原文术语给出 PT/LLT 建议（精确/词序/包含/模糊），支持逐条接受、改码、拒绝，导出带受试者定位信息的编码清单 CSV。
-- 手机上会提示使用电脑端。这个工具主要给电脑大屏使用。
-
-## 常见问题
-
-### 打开后说没有词典
-
-进入“设置”，点“选择词典文件夹”，重新选择 MedDRA 文件夹。
-
-### Windows 第一次运行很慢
-
-第一次会在便携包文件夹里准备本地 Python 运行环境并安装后端依赖。等它跑完，不要关窗口。以后再打开会快很多。
-
-### Windows 必须提前安装 Python 3.10 吗
-
-不需要。当前程序支持 Python 3.9 或更新版本。新版便携包已经内置 Windows x64 Python 安装器；双击第一步文件后，它会优先使用包内运行环境。旧包里出现的 “Install Python 3.10 or later” 是启动脚本提示不准确，不代表程序必须用 3.10。
-
-### Mac 提示无法打开 App
-
-右键点 App，选择“打开”。如果仍然打不开，请确认电脑上有 `python3`。
-
-### 我能把词典发给别人吗
-
-本项目不包含词典，也不处理 MedDRA 授权。词典怎么使用、能不能转发，请按你自己的 MedDRA 授权要求处理。
-
-## 给开发者
-
-本项目使用 FastAPI、SQLite FTS5、Vite、React 和 TypeScript。
-
-常用命令：
+本仓库使用 React、TypeScript、FastAPI 与 SQLite FTS5。开发环境需要 Node.js 22.12 或更高版本。构建发布包需要 macOS、Apple SDK、Python 3.12+ 及 `uv`。
 
 ```bash
-cd frontend
-npm install
-npm run build
+(cd frontend && npm ci && npm run build)
+./scripts/start_meddra_server.sh
 ```
+
+在浏览器打开启动窗口显示的地址。开发测试请显式设置本地已获授权词典目录和临时状态目录。
 
 ```bash
 python3 -m pip install -r backend/requirements-dev.txt
-PYTHONPATH=backend python3 -m unittest discover -s backend/tests -v
+MEDDRA_SOURCE_ROOT="/path/to/licensed/MedDRA" \
+MEDDRA_BROWSER_STATE_DIR="$(mktemp -d)" PYTHONPATH=backend \
+  python3 -m unittest discover -s backend/tests -v
 ```
-
-本地启动：
-
-```bash
-./scripts/start_meddra_server.sh
-open http://127.0.0.1:8765/
-```
-
-打包：
 
 ```bash
 ./scripts/build_free_release.sh
-./scripts/build_macos_app.sh "/Applications/MedDRA Browser Mac.app"
-./scripts/build_portable_package.sh
 ```
 
-浏览器 smoke 测试：
-
-```bash
-MEDDRA_BROWSER_URL=http://127.0.0.1:8765/ python3 scripts/playwright_smoke.py
-```
-
-发布包不应包含 MedDRA 原始数据、SQLite 缓存、`pyc` 文件或本机路径。
-
-Mac App Store 上架准备：
-
-```bash
-APP_STORE_BUNDLE_ID=com.yourcompany.meddra-browser ./scripts/preflight_app_store.sh
-```
-
-详细步骤、审核备注、隐私答复和元数据草稿见 `docs/app-store/APP_STORE_SUBMISSION_ZH.md`。
+产物在 `build/`。构建器校验 CPython 归档 SHA-256，按目标系统架构安装 [锁定的依赖](scripts/runtime-requirements.txt)。分发包保留 Python 和依赖的许可证说明。独立 Python 运行时来自 [Astral Python Build Standalone](https://github.com/astral-sh/python-build-standalone/releases/tag/20261110)。发布包卫生检查覆盖原始词典、缓存及构建机路径。关于分发与系统验证提示，参见 [ZIP 分发](docs/no-apple-developer-program-distribution-zh.md) 与 [App Store 准备说明](docs/app-store/APP_STORE_SUBMISSION_ZH.md)。
 
 ## License
 
-This repository is source-available for personal, non-commercial use under `LICENSE.md`.
-
-MedDRA dictionary data is not included. MedDRA data use is governed by the relevant MedDRA/MSSO/ICH license terms.
-
-## English quick start
-
-Download `meddra-browser-mac-app.zip` for Mac, or `meddra-browser-portable.zip` for Windows/Mac portable use.
-
-Mac App: unzip, move the app to Applications, open it, then choose your MedDRA dictionary folder from Settings.
-
-Portable package: run the step 1 launcher for your operating system. The launcher starts the local service and opens the browser entry after the service is ready. If the browser does not open automatically, open `第二步：双击我开始MedDRA浏览.html`. If no dictionary is loaded, use Settings to select a MedDRA release folder, a `MedAscii` folder, an `ascii-*` folder, or their parent folder.
+This repository is source-available under the [MedDRA Browser Personal Non-Commercial License](LICENSE.md). MedDRA data are governed by the applicable MedDRA/MSSO/ICH license terms.

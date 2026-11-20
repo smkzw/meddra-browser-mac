@@ -1,327 +1,135 @@
 <!doctype html>
 <html lang="zh-CN">
-  <head>
-    <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>MedDRA Browser 便携版入口</title>
-    <style>
-      :root {
-        font-family: Inter, "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
-        color: #17201b;
-        background: #eef2ef;
-      }
-      body {
-        min-height: 100vh;
-        margin: 0;
-        display: grid;
-        place-items: center;
-        padding: 24px;
-      }
-      main {
-        width: min(720px, 100%);
-        padding: 28px;
-        border: 1px solid #dce4df;
-        border-radius: 10px;
-        background: #fbfcfb;
-        box-shadow: 0 18px 44px rgba(31, 74, 63, 0.12);
-      }
-      header {
-        display: flex;
-        align-items: center;
-        gap: 14px;
-        margin-bottom: 18px;
-      }
-      img {
-        width: 56px;
-        height: 56px;
-        border-radius: 12px;
-      }
-      h1 {
-        margin: 0;
-        font-size: 24px;
-      }
-      p {
-        line-height: 1.7;
-      }
-      code {
-        padding: 2px 5px;
-        border-radius: 5px;
-        background: #edf3ef;
-      }
-      a {
-        color: #126451;
-        font-weight: 700;
-      }
-      .status {
-        margin-top: 18px;
-        padding: 12px 14px;
-        border-radius: 8px;
-        background: #edf7f3;
-      }
-      .status-actions {
-        display: flex;
-        align-items: center;
-        gap: 10px;
-        flex-wrap: wrap;
-      }
-      button {
-        padding: 9px 14px;
-        border: 1px solid #126451;
-        border-radius: 7px;
-        color: #fff;
-        background: #126451;
-        font: inherit;
-        font-weight: 700;
-        cursor: pointer;
-      }
-      button:hover {
-        background: #0d4f40;
-      }
-      .steps {
-        display: grid;
-        gap: 10px;
-        margin: 18px 0;
-      }
-      .step {
-        padding: 12px 14px;
-        border: 1px solid #dce4df;
-        border-radius: 8px;
-        background: #f6f8f7;
-      }
-      .step strong {
-        display: block;
-        margin-bottom: 4px;
-      }
-    </style>
-    <script>
-      function platformStepText() {
-        const platform = navigator.platform || "";
-        const ua = navigator.userAgent || "";
-        if (/Win/i.test(platform) || /Windows/i.test(ua)) {
-          return "请先双击【Windows】第一步：请双击我运行.bat；第一次会自动准备本地 Python 运行环境。";
-        }
-        if (/Mac/i.test(platform) || /Mac OS/i.test(ua)) {
-          return "请先双击【Mac】第一步：请双击我运行.command。";
-        }
-        return "请先运行与你电脑系统对应的“第一步”文件。";
-      }
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>MedDRA Browser 便携版入口</title>
+  <style>
+    :root {
+      color-scheme: light;
+      font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", sans-serif;
+      color: #2e221f;
+      background: #faf5ef;
+    }
+    * { box-sizing: border-box; }
+    body {
+      min-height: 100vh;
+      display: grid;
+      place-items: center;
+      margin: 0;
+      padding: 24px;
+      background: radial-gradient(ellipse at 28% 8%, #fffaf1, transparent 62%), #f6ede4;
+    }
+    main {
+      width: min(620px, 100%);
+      padding: 26px;
+      background: linear-gradient(168deg, #fff 0%, #fffdf9 47%, #faf3eb 100%);
+      border: 1px solid #e6d6c8;
+      border-radius: 15px;
+      box-shadow: 0 1px 2px #64402a12, 0 8px 22px #64402a12, 0 20px 55px #64402a10;
+    }
+    header { display: flex; align-items: center; gap: 12px; }
+    img { width: 42px; height: 42px; }
+    h1 { font-size: 22px; margin: 0; }
+    p { margin: 12px 0; line-height: 1.55; }
+    .hint { color: #665347; }
+    #status { padding: 12px; margin: 16px 0 10px; background: #f8eee4; border-radius: 8px; }
+    #address { user-select: all; font-size: 14px; overflow-wrap: anywhere; }
+    button {
+      color: white;
+      background: #a8391b;
+      border: 1px solid #a8391b;
+      border-radius: 7px;
+      padding: 7px 12px;
+      font: inherit;
+      cursor: pointer;
+    }
+    button:disabled { opacity: .65; cursor: wait; }
+    button:focus-visible { outline: 3px solid #b6502d; outline-offset: 3px; }
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <img src="frontend/dist/brand/app-icon-256.png" alt="">
+      <h1>MedDRA Browser 便携版</h1>
+    </header>
+    <p id="launcher">完整解压后，双击与系统对应的第一步启动文件。</p>
+    <p class="hint">启动后通常会自动打开工作台。使用期间保持启动窗口打开。</p>
+    <p id="status" role="status">正在确认本文件夹的启动状态…</p>
+    <button id="retry" type="button">重新检测</button>
+    <p class="hint" id="manual" hidden>如果启动窗口仍显示下列地址，可复制到浏览器地址栏。<br><code id="address"></code></p>
+    <noscript><p>在启动窗口复制本地服务地址，再粘贴到浏览器地址栏。</p></noscript>
+  </main>
+  <script>
+    const status = document.querySelector("#status");
+    const retry = document.querySelector("#retry");
+    const manual = document.querySelector("#manual");
+    const platform = navigator.userAgentData?.platform || navigator.platform;
+    const system = /win/i.test(platform) ? "Windows" : /mac/i.test(platform) ? "Mac" : "";
+    if (system) {
+      const extension = system === "Mac" ? "command" : "bat";
+      document.querySelector("#launcher").textContent =
+        `完整解压后，双击「【${system}】第一步：请双击我运行.${extension}」。`;
+    }
 
-      function isPortableInfo(info) {
-        return Boolean(
-          info &&
-          info.distribution_mode === "portable" &&
-          info.app_store_mode === false
-        );
-      }
-
-      const DEFAULT_PORT = 8765;
-      const SCAN_WIDTH = 20;
-
-      function hintedPort() {
-        const queryValue = Number.parseInt(
-          new URLSearchParams(window.location.search).get("port") || "",
-          10
-        );
-        return Number.isInteger(queryValue) && queryValue >= 1024 && queryValue <= 65500
-          ? queryValue
-          : null;
-      }
-
-      async function fetchRuntimeInfo(port) {
-        const controller = new AbortController();
-        const timeout = window.setTimeout(() => controller.abort(), 800);
-        try {
-          const response = await fetch(`http://127.0.0.1:${port}/api/runtime-info`, {
-            cache: "no-store",
-            signal: controller.signal,
-          });
-          if (!response.ok) return null;
-          const info = await response.json();
-          return isPortableInfo(info) ? info : null;
-        } catch (error) {
-          return null;
-        } finally {
-          window.clearTimeout(timeout);
-        }
-      }
-
-      function jsonpRuntimeInfo(port) {
-        return new Promise((resolve) => {
-          const base = `http://127.0.0.1:${port}`;
-          const callbackName = `__meddraPortableProbe${Date.now()}${Math.random().toString(36).slice(2)}`;
-          const script = document.createElement("script");
-          let settled = false;
-          const cleanup = (result) => {
-            if (settled) return;
-            settled = true;
-            window.clearTimeout(timeout);
-            script.remove();
-            try {
-              delete window[callbackName];
-            } catch (error) {
-              window[callbackName] = undefined;
-            }
-            resolve(result);
-          };
-          const timeout = window.setTimeout(() => cleanup(null), 1200);
-          window[callbackName] = (info) => {
-            cleanup(isPortableInfo(info) ? info : null);
-          };
-          script.async = true;
-          script.onerror = () => cleanup(null);
-          script.src = `${base}/api/runtime-info?callback=${encodeURIComponent(callbackName)}&t=${Date.now()}`;
-          document.head.appendChild(script);
-        });
-      }
-
-      async function probePort(port) {
-        const fetched = await fetchRuntimeInfo(port);
-        if (fetched) return fetched;
-        // A file:// page can be blocked from fetch/XHR by Windows browser
-        // security policies. JSONP uses a script load and works in that case.
-        return jsonpRuntimeInfo(port);
-      }
-
-      function loadSidecarRuntime() {
-        return new Promise((resolve) => {
-          if (window.__MEDDRA_PORTABLE_RUNTIME && window.__MEDDRA_PORTABLE_RUNTIME.url) {
-            resolve(window.__MEDDRA_PORTABLE_RUNTIME);
-            return;
-          }
-          const script = document.createElement("script");
-          const finish = (value) => {
-            script.remove();
-            resolve(value);
-          };
-          script.async = true;
-          script.onload = () => finish(window.__MEDDRA_PORTABLE_RUNTIME || null);
-          script.onerror = () => finish(null);
-          script.src = "portable-active-port.js?t=" + Date.now();
-          document.head.appendChild(script);
-        });
-      }
-
-      function candidatePorts(sidecarPort = null) {
-        const ports = [];
-        const push = (port) => {
-          if (Number.isInteger(port) && port >= 1024 && port <= 65535 && !ports.includes(port)) {
-            ports.push(port);
-          }
+    function readSidecar() {
+      return new Promise(resolve => {
+        delete window.__MEDDRA_PORTABLE_RUNTIME;
+        const script = document.createElement("script");
+        const finish = () => {
+          clearTimeout(timeout);
+          script.remove();
+          resolve(window.__MEDDRA_PORTABLE_RUNTIME);
         };
-        if (Number.isInteger(sidecarPort)) push(sidecarPort);
-        const hint = hintedPort();
-        if (hint !== null) {
-          for (let index = 0; index < SCAN_WIDTH; index += 1) push(hint + index);
-        }
-        for (let index = 0; index < SCAN_WIDTH; index += 1) push(DEFAULT_PORT + index);
-        return ports;
-      }
-
-      let attempts = 0;
-      let retryTimer = null;
-      const MAX_AUTOMATIC_ATTEMPTS = 30;
-
-      function setStatus(message, allowRetry = false) {
-        const status = document.getElementById("status");
-        const retry = document.getElementById("retry");
-        status.textContent = message;
-        retry.hidden = !allowRetry;
-      }
-
-      async function checkServer() {
-        const sidecar = await loadSidecarRuntime();
-        const sidecarReady = Boolean(
-          sidecar &&
-          sidecar.ready === true &&
-          sidecar.distribution_mode === "portable" &&
-          sidecar.app_store_mode === false &&
-          typeof sidecar.url === "string" &&
-          Number.isInteger(sidecar.port)
-        );
-        const ports = candidatePorts(sidecarReady ? sidecar.port : null);
-        const candidates = await Promise.all(ports.map(async (port) => {
-          const info = await probePort(port);
-          return info ? { port, base: `http://127.0.0.1:${port}`, info } : null;
-        }));
-        const portable = candidates.find(Boolean);
-        if (portable) {
-          setStatus(`本地服务已启动（端口 ${portable.port}），正在打开浏览器界面...`);
-          window.location.href = `${portable.base}/`;
-          return;
-        }
-
-        // A file:// page can be denied every localhost probe by the browser.
-        // The launcher writes this sidecar only after the service is ready, so
-        // it is a safe last-resort handoff for that specific origin. If the
-        // sidecar port was actually probed and returned null, however, the
-        // sidecar is stale (for example after a forced process kill); following
-        // it would strand the user on a browser connection-error page.
-        const sidecarProbedStale = sidecarReady && ports.includes(sidecar.port)
-          && candidates[ports.indexOf(sidecar.port)] === null;
-        if (window.location.protocol === "file:" && sidecarReady && !sidecarProbedStale) {
-          setStatus("浏览器限制了本机探测，正在使用第一步写入的服务地址 " + sidecar.url + " ...");
-          window.location.href = sidecar.url;
-          return;
-        }
-
-        attempts += 1;
-        const sortedPorts = [...ports].sort((a, b) => a - b);
-        const rangeStart = sortedPorts[0];
-        const rangeEnd = sortedPorts[sortedPorts.length - 1];
-        const scanned = rangeStart === rangeEnd
-          ? `${rangeStart}`
-          : `${rangeStart}-${rangeEnd}（共 ${ports.length} 个）`;
-        if (attempts >= MAX_AUTOMATIC_ATTEMPTS) {
-          setStatus(
-            `暂时没有检测到便携版服务（已检测端口 ${scanned}）。请先启动对应系统的“第一步”文件，` +
-            "保持窗口打开后点击“重新检测”。",
-            true,
-          );
-          return;
-        }
-        setStatus(
-          `还没有检测到便携版服务（已检测端口 ${scanned}，第 ${attempts} 次）；` +
-          "请先启动对应系统的“第一步”文件，并保持那个窗口不要关闭。",
-        );
-        retryTimer = window.setTimeout(checkServer, 2000);
-      }
-      window.addEventListener("DOMContentLoaded", () => {
-        document.getElementById("retry").addEventListener("click", () => {
-          if (retryTimer !== null) window.clearTimeout(retryTimer);
-          retryTimer = null;
-          attempts = 0;
-          setStatus("正在重新检测本地服务...");
-          checkServer();
-        });
-        checkServer();
+        const timeout = setTimeout(finish, 800);
+        script.onload = script.onerror = finish;
+        script.src = "portable-active-port.js?t=" + Date.now();
+        document.head.append(script);
       });
-    </script>
-  </head>
-  <body>
-    <main>
-      <header>
-        <img src="frontend/dist/brand/app-icon-256.png" alt="" />
-        <div>
-          <h1>MedDRA Browser Portable</h1>
-          <p>本地词典浏览 · 中文界面 · Windows 和 Mac 共用便携包</p>
-        </div>
-      </header>
-      <p>浏览器不能直接替你运行电脑里的程序，所以便携版分两步打开。</p>
-      <div class="steps">
-        <div class="step">
-          <strong>第一步：启动本地服务</strong>
-          Windows 双击 <code>【Windows】第一步：请双击我运行.bat</code>；第一次会在本文件夹下准备本地 Python 运行环境，不需要另外安装 Python。Mac 双击 <code>【Mac】第一步：请双击我运行.command</code>。请保持第一步打开的窗口不要关闭。
-        </div>
-        <div class="step">
-          <strong>第二步：打开浏览器入口</strong>
-          第一运行窗口会在服务启动后自动打开页面。如果没有自动打开，再双击 <code>第二步：双击我开始MedDRA浏览.html</code>。如果服务已经启动，本页会自动进入系统。
-        </div>
-      </div>
-      <p>进入系统后，如果提示还没有词典，请点“选择词典文件夹”。在文件管理器或 Finder 里选你的 MedDRA 文件夹即可，比如 MedDRA_29_0_Chinese、MedDRA_29_0_English、MedAscii、ascii-290，或它们的上级文件夹。</p>
-      <div class="status-actions">
-        <div id="status" class="status">正在检测本地服务...</div>
-        <button id="retry" type="button" hidden>重新检测</button>
-      </div>
-    </main>
-  </body>
+    }
+
+    async function detect() {
+      retry.disabled = true;
+      manual.hidden = true;
+      status.textContent = "正在确认本文件夹的启动状态…";
+      const info = await readSidecar();
+      if (!info || info.distribution_mode !== "portable" ||
+          !Number.isInteger(info.port) || info.port < 1 || info.port > 65535 ||
+          !/^[a-f0-9]{32}$/.test(info.instance_id)) {
+        status.textContent = "当前文件夹尚无可用地址。请运行第一步，待启动窗口显示地址后重新检测。";
+        retry.disabled = false;
+        return;
+      }
+
+      const url = `http://127.0.0.1:${info.port}/`;
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 1800);
+      try {
+        const response = await fetch(url + "api/runtime-info", {
+          cache: "no-store",
+          credentials: "omit",
+          signal: controller.signal,
+        });
+        const active = response.ok ? await response.json() : null;
+        if (active?.distribution_mode === "portable" && active.instance_id === info.instance_id) {
+          status.textContent = "本地服务已启动，正在打开工作台…";
+          window.location.replace(url);
+          return;
+        }
+        status.textContent = "当前地址已失效。请重新运行第一步。";
+      } catch {
+        status.textContent = "暂时无法确认服务。请查看启动窗口，或在启动完成后重新检测。";
+        document.querySelector("#address").textContent = url;
+        manual.hidden = false;
+      } finally {
+        clearTimeout(timeout);
+        retry.disabled = false;
+      }
+    }
+
+    retry.addEventListener("click", detect);
+    detect();
+  </script>
+</body>
 </html>

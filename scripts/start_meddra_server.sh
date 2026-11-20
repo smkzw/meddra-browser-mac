@@ -1,39 +1,24 @@
 #!/bin/zsh
 set -eu
 
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-REPO_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
-HOST="${MEDDRA_BROWSER_HOST:-127.0.0.1}"
-PORT="${MEDDRA_BROWSER_PORT:-8765}"
-LOG_DIR="${REPO_DIR}/logs/app"
-SERVER_LOG="${LOG_DIR}/server.log"
-PID_FILE="${LOG_DIR}/server.pid"
-VENV_DIR="${REPO_DIR}/.venv_macos"
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+cd "$ROOT"
 
-mkdir -p "${LOG_DIR}"
-cd "${REPO_DIR}"
-
-if ! command -v python3 >/dev/null 2>&1; then
-  echo "未找到 python3。请先安装 Python 3.9 或更新版本，然后重新运行第一步入口。" >&2
-  exit 1
+if [[ -d tools ]]; then
+  case "$(/usr/bin/uname -m)" in
+    arm64|x86_64) runtime="tools/python/macos-$(/usr/bin/uname -m)/bin/python3.13" ;;
+    *) echo "当前 Mac 处理器架构不受支持。" >&2; exit 1 ;;
+  esac
+  if [[ ! -x "$runtime" ]]; then
+    echo "包内 Mac 运行时缺失。请完整解压便携 ZIP 后，再运行 Mac 启动文件。" >&2
+    exit 1
+  fi
+  exec "./$runtime" -I -B -X utf8 scripts/run_portable_server.py
 fi
 
-if [ ! -x "${VENV_DIR}/bin/python" ]; then
-  echo "正在准备本地 Python 运行环境..."
-  python3 -m venv "${VENV_DIR}"
+# Source checkout only. The published package always uses its bundled runtime.
+if [[ ! -x .venv/bin/python ]]; then
+  python3 -m venv .venv
+  .venv/bin/python -m pip install -r backend/requirements.txt
 fi
-
-echo "正在检查后端依赖..."
-if ! "${VENV_DIR}/bin/python" -m pip install -r "${REPO_DIR}/backend/requirements.txt" >> "${SERVER_LOG}" 2>&1; then
-  echo "后端依赖安装失败。最近日志如下：" >&2
-  tail -n 40 "${SERVER_LOG}" >&2 || true
-  exit 1
-fi
-
-export PYTHONPATH="${REPO_DIR}/backend"
-# A portable bundle is never an App Store sandbox candidate. Set this here and
-# again in run_portable_server.py so it cannot inherit a stale GUI environment.
-export MEDDRA_APP_STORE_MODE="0"
-export MEDDRA_DISTRIBUTION_MODE="portable"
-echo "$$" > "${PID_FILE}"
-exec "${VENV_DIR}/bin/python" "${REPO_DIR}/scripts/run_portable_server.py"
+exec .venv/bin/python -I -B -X utf8 scripts/run_portable_server.py --dev

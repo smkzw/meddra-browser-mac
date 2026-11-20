@@ -3,29 +3,23 @@ set -eu
 set -o pipefail
 
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-APP_VERSION="$(python3 - "${ROOT_DIR}/frontend/package.json" <<'PY'
-import json
-import sys
-from pathlib import Path
-
-print(json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))["version"])
-PY
-)"
 APP_PATH="${ROOT_DIR}/build/MedDRA Browser Mac.app"
 MAC_ZIP="${ROOT_DIR}/build/meddra-browser-mac-app.zip"
-MAC_VERSION_ZIP="${ROOT_DIR}/build/MedDRA-Browser-Mac-v${APP_VERSION}.zip"
+PORTABLE_ZIP="${ROOT_DIR}/build/meddra-browser-portable.zip"
 
 cd "${ROOT_DIR}"
+(cd frontend && npm run build)
+export MEDDRA_FRONTEND_PREBUILT=1
 
 "${ROOT_DIR}/scripts/build_macos_app.sh" "${APP_PATH}"
-
-rm -f "${MAC_ZIP}" "${MAC_VERSION_ZIP}"
-ditto -c -k --sequesterRsrc --keepParent "${APP_PATH}" "${MAC_ZIP}"
-cp "${MAC_ZIP}" "${MAC_VERSION_ZIP}"
-
+TEMP_ZIP="$(mktemp "${ROOT_DIR}/build/.meddra-mac.XXXXXXXX")"
+trap 'rm -f "$TEMP_ZIP"' EXIT
+rm -f "$TEMP_ZIP"
+ditto -c -k --keepParent "${APP_PATH}" "$TEMP_ZIP"
+mv "$TEMP_ZIP" "${MAC_ZIP}"
 "${ROOT_DIR}/scripts/build_portable_package.sh"
 
-python3 - "${APP_PATH}" "${MAC_ZIP}" "${MAC_VERSION_ZIP}" "${ROOT_DIR}/build/meddra-browser-portable.zip" <<'PY'
+python3 - "${APP_PATH}" "${MAC_ZIP}" "${PORTABLE_ZIP}" <<'PY'
 from __future__ import annotations
 
 import sys
@@ -112,8 +106,7 @@ PY
 echo
 echo "无 Apple Developer Program 的分发包已生成："
 echo "- ${MAC_ZIP}"
-echo "- ${MAC_VERSION_ZIP}"
 echo "- ${ROOT_DIR}/build/meddra-browser-portable.zip"
 echo
-echo "这些包未经过 Apple Developer ID 签名/公证，也不能上传 Mac App Store。"
-echo "Mac 用户首次打开时可能需要右键 App 选择“打开”。"
+echo "Mac App 已本地签名，未经过 Apple Developer ID 签名和公证。首次打开受 macOS 安全策略约束。"
+(cd build && shasum -a 256 meddra-browser-mac-app.zip meddra-browser-portable.zip > SHA256SUMS.txt)
