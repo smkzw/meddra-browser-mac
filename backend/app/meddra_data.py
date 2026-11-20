@@ -10,6 +10,7 @@ import re
 import shutil
 import sqlite3
 import sys
+import threading
 import time
 import unicodedata
 from dataclasses import dataclass
@@ -27,7 +28,8 @@ else:
 
 LEVELS = ["SOC", "HLGT", "HLT", "PT", "LLT"]
 ALL_SEARCH_LEVELS = [*LEVELS, "SMQ"]
-INDEX_SIGNATURE_VERSION = "0.1.5-source-signature-v1"
+INDEX_SIGNATURE_VERSION = "0.2.0-source-signature-v2"
+SOURCE_ROOTS_LOCK = threading.Lock()
 REQUIRED_ASC_FILES = {
     "soc.asc",
     "hlgt.asc",
@@ -401,21 +403,22 @@ def configured_source_roots(root: Path | None = None) -> list[Path]:
 
 
 def add_source_root(path: str) -> Path:
-    candidate = Path(path).expanduser()
+    candidate = Path(path).expanduser().resolve()
     if not candidate.exists() or not candidate.is_dir():
         raise RuntimeError("目录不存在或不可读取")
     if not discover_releases(candidate):
         raise RuntimeError("未在所选文件夹或其子文件夹中发现可用的MedDRA ASCII词典目录")
-    roots = [item for item in load_source_roots() if item != candidate]
-    # Newest explicit selection becomes the first configured root so the same
-    # MedDRA version from a newly chosen folder wins over stale earlier roots.
-    roots.insert(0, candidate)
-    target = source_roots_file()
-    target.parent.mkdir(parents=True, exist_ok=True)
-    payload = json.dumps([{"path": str(item)} for item in roots], ensure_ascii=False, indent=2)
-    temp_path = target.with_name(f".{target.name}.{os.getpid()}.tmp")
-    temp_path.write_text(payload, encoding="utf-8")
-    os.replace(temp_path, target)
+    with SOURCE_ROOTS_LOCK:
+        roots = [candidate, *(item for item in load_source_roots() if item != candidate)]
+        target = source_roots_file()
+        target.parent.mkdir(parents=True, exist_ok=True)
+        payload = json.dumps([{"path": str(item)} for item in roots], ensure_ascii=False, indent=2)
+        temp_path = target.with_name(f".{target.name}.{os.getpid()}.tmp")
+        try:
+            temp_path.write_text(payload, encoding="utf-8")
+            os.replace(temp_path, target)
+        finally:
+            temp_path.unlink(missing_ok=True)
     return candidate
 
 
@@ -689,6 +692,7 @@ class MeddraIndexer:
             language_dirs = self._language_dirs()
             if not language_dirs:
                 raise RuntimeError("未配置可用的英文或中文MedDRA ASCII目录")
+            source_signature = self._source_signature()
             progress_counts = self._progress_row_counts(language_dirs)
             self._progress_total_rows = max(1, self._progress_total_from_counts(progress_counts, language_dirs))
             self._progress_processed_rows = 0
@@ -714,7 +718,9 @@ class MeddraIndexer:
                     self._report_progress("fts", "构建全文搜索索引")
                     self._build_fts(con)
                     self._report_progress("metadata", "写入索引元数据")
-                    self._write_metadata(con)
+                    if self._source_signature() != source_signature:
+                        raise RuntimeError("构建期间词典源文件已更改，请确认文件完整后重新构建索引")
+                    self._write_metadata(con, source_signature)
                     self._check_temp_size()
                     con.commit()
                 finally:
@@ -874,7 +880,7 @@ class MeddraIndexer:
         parts = [INDEX_SIGNATURE_VERSION, f"version:{self.config.version}"]
         for lang, base in self._language_dirs():
             parts.append(f"lang:{lang}:{base.resolve()}")
-            for file_name in sorted(REQUIRED_ASC_FILES):
+            for file_name in sorted(REQUIRED_ASC_FILES | OPTIONAL_ASC_FILES):
                 path = base / file_name
                 try:
                     stat = path.stat()
@@ -904,10 +910,10 @@ class MeddraIndexer:
             return False
         return bool(row and row[0] == self._source_signature())
 
-    def _write_metadata(self, con: sqlite3.Connection) -> None:
+    def _write_metadata(self, con: sqlite3.Connection, source_signature: str) -> None:
         languages = ",".join(lang for lang, _base in self._language_dirs())
         rows = [
-            ("source_signature", self._source_signature()),
+            ("source_signature", source_signature),
             ("index_signature_version", INDEX_SIGNATURE_VERSION),
             ("meddra_version", self.config.version),
             ("available_languages", languages),
@@ -1427,31 +1433,19 @@ class MeddraStore:
         finally:
             con.close()
 
-    def index_identity(self) -> dict[str, Any]:
+    def index_identity(self, con: sqlite3.Connection | None = None) -> dict[str, Any]:
         """Public, path-free identity for binding coding sessions to an index."""
-        signature = ""
-        with self.connect() as con:
-            try:
-                row = con.execute(
-                    "select value from index_metadata where key='source_signature'"
-                ).fetchone()
-                if row is not None:
-                    signature = str(row["value"])
-            except (sqlite3.DatabaseError, KeyError, IndexError, TypeError):
-                signature = ""
-        if not signature:
-            signature = MeddraIndexer(self.config)._source_signature()
-        languages = [
-            lang
-            for lang, path in [("en", self.config.english_dir), ("zh", self.config.chinese_dir)]
-            if path is not None
-        ]
+        if con is None:
+            with self.connect() as connection:
+                return self.index_identity(connection)
+        metadata = dict(con.execute("select key, value from index_metadata"))
+        languages = metadata["available_languages"].split(",")
         return {
-            "version": self.config.version,
+            "version": metadata["meddra_version"],
             "available_languages": languages,
-            "source_signature": signature,
-            "index_signature_version": INDEX_SIGNATURE_VERSION,
-            "complete": bool(self.config.english_dir and self.config.chinese_dir),
+            "source_signature": metadata["source_signature"],
+            "index_signature_version": metadata["index_signature_version"],
+            "complete": "en" in languages and "zh" in languages,
         }
 
     def status(self) -> dict[str, Any]:
@@ -1461,7 +1455,7 @@ class MeddraStore:
                 "select level, count(*) as n from terms group by level order by case level when 'SOC' then 1 when 'HLGT' then 2 when 'HLT' then 3 when 'PT' then 4 when 'LLT' then 5 end"
             ).fetchall()
             smq_count = con.execute("select count(*) as n from smq").fetchone()["n"]
-            identity = self.index_identity()
+            identity = self.index_identity(con)
             return {
                 "version": self.config.version,
                 "available_languages": identity["available_languages"],
@@ -1474,12 +1468,16 @@ class MeddraStore:
                 "smq_count": smq_count,
             }
 
-    def term_by_code(self, level: str, code: str) -> dict[str, Any] | None:
-        with self.connect() as con:
-            row = con.execute(
-                "select * from terms where level=? and code=?",
-                (level.upper(), str(code)),
-            ).fetchone()
+    def term_by_code(
+        self, level: str, code: str, *, con: sqlite3.Connection | None = None
+    ) -> dict[str, Any] | None:
+        if con is None:
+            with self.connect() as connection:
+                return self.term_by_code(level, code, con=connection)
+        row = con.execute(
+            "select * from terms where level=? and code=?",
+            (level.upper(), str(code)),
+        ).fetchone()
         return dict(row) if row is not None else None
 
     def search(

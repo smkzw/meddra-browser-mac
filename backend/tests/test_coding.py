@@ -17,7 +17,7 @@ from app.coding import (
     parse_data_listing_csv,
     parse_data_listing_excel,
     safe_download_filename,
-    validate_decision_against_store,
+    validate_coding_pair,
 )
 from app.meddra_data import clinical_zh_expansions
 
@@ -187,39 +187,23 @@ class CodingListingTests(unittest.TestCase):
                     return {"code": "99999999", "zh_name": "其他", "en_name": "Other"}
                 return None
 
-        bad = validate_decision_against_store(
-            FakeStore(),
-            {"status": "accepted", "llt_code": "10019211", "pt_code": "99999999"},
-        )
-        self.assertFalse(bad["ok"])
-        self.assertIn("父级 PT", bad["reason"])
-        good = validate_decision_against_store(
-            FakeStore(),
-            {"status": "accepted", "llt_code": "10019211", "pt_code": "10019211"},
-        )
+        lookup = FakeStore().term_by_code
+        for llt_code, pt_code, reason in [
+            ("10019211", "99999999", "父级 PT"),
+            ("", "10019211", "当前 LLT"),
+            ("10000001", "10019211", "非当前"),
+            ("99999997", "10019211", "不在当前词典"),
+        ]:
+            with self.subTest(llt_code=llt_code, pt_code=pt_code):
+                bad = validate_coding_pair(lookup, {"llt_code": llt_code, "pt_code": pt_code})
+                self.assertFalse(bad["ok"])
+                self.assertIn(reason, bad["reason"])
+        good = validate_coding_pair(lookup, {
+            "llt_code": "10019211", "pt_code": "10019211", "llt_en": "untrusted",
+        })
         self.assertTrue(good["ok"])
         self.assertEqual(good["codes"]["pt_code"], "10019211")
-
-        pt_only = validate_decision_against_store(
-            FakeStore(),
-            {"status": "accepted", "pt_code": "10019211"},
-        )
-        self.assertFalse(pt_only["ok"])
-        self.assertIn("不允许仅 PT", pt_only["reason"])
-
-        unknown = validate_decision_against_store(
-            FakeStore(),
-            {"status": "accepted", "llt_code": "00000000"},
-        )
-        self.assertFalse(unknown["ok"])
-        self.assertIn("未知", unknown["reason"])
-
-        obsolete = validate_decision_against_store(
-            FakeStore(),
-            {"status": "accepted", "llt_code": "10000001", "pt_code": "10019211"},
-        )
-        self.assertFalse(obsolete["ok"])
-        self.assertIn("非当前", obsolete["reason"])
+        self.assertEqual(good["codes"]["llt_en"], "Headache")
 
     def test_export_bundle_rejects_pt_only_and_noncurrent_when_store_bound(self) -> None:
         class FakeStore:
@@ -242,19 +226,10 @@ class CodingListingTests(unittest.TestCase):
             "AE|旧词": {"status": "accepted", "llt_code": "10000001", "pt_code": "10019211"},
             "AE|仅PT": {"status": "accepted", "pt_code": "10019211"},
         }
-        bundle = build_export_bundle(
-            unique_terms,
-            decisions,
-            dictionary_version="29.0",
-            store=FakeStore(),
-            source_signature="sig",
-        )
-        self.assertEqual(len(bundle["coded_rows"]), 1)
-        self.assertEqual(bundle["coded_rows"][0]["原文术语"], "头痛")
-        self.assertEqual(bundle["coded_rows"][0]["索引签名"], "sig")
-        reasons = {row["原文术语"]: row["审阅异常原因"] for row in bundle["exception_rows"]}
-        self.assertIn("非当前", reasons["旧词"])
-        self.assertIn("仅 PT", reasons["仅PT"])
+        with self.assertRaisesRegex(ValueError, "非当前"):
+            build_export_bundle(unique_terms, decisions, lookup=FakeStore().term_by_code)
+        with self.assertRaisesRegex(ValueError, "当前 LLT"):
+            build_export_bundle([unique_terms[-1]], decisions, lookup=FakeStore().term_by_code)
 
 
 if __name__ == "__main__":

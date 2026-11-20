@@ -80,7 +80,7 @@ class ApiManualCoverageTests(unittest.TestCase):
 
     def test_runtime_shutdown_requires_installed_callback(self) -> None:
         missing = self.client.post("/api/runtime/shutdown", headers={"Content-Type": "application/json"}, content=b"{}")
-        self.assertEqual(missing.status_code, 409)
+        self.assertEqual(missing.status_code, 400)
         calls: list[str] = []
         app.state.request_shutdown = lambda: calls.append("stop")  # type: ignore[attr-defined]
         try:
@@ -312,13 +312,18 @@ class ApiManualCoverageTests(unittest.TestCase):
         )
         self.assertEqual(imported.status_code, 200)
         unique_terms = imported.json()["unique_terms"]
-        # Formal coded export without version+signature must fail closed.
-        missing_identity = self.client.post(
+        signature = self.client.get("/api/status", params={"version": self.version}).json()["source_signature"]
+        blocked = self.client.post(
             "/api/coding/export",
-            json={"unique_terms": unique_terms, "decisions": {}, "export_mode": "coded"},
+            json={
+                "unique_terms": unique_terms,
+                "export_mode": "coded",
+                "dictionary_version": self.version,
+                "source_signature": signature,
+            },
         )
-        self.assertEqual(missing_identity.status_code, 400)
-        self.assertEqual(missing_identity.json()["detail"]["error"], "export_identity_required")
+        self.assertEqual(blocked.status_code, 409)
+        self.assertEqual(blocked.json()["detail"]["error"], "no_confirmed_codes")
         exceptions = self.client.post(
             "/api/coding/export",
             json={
@@ -329,59 +334,41 @@ class ApiManualCoverageTests(unittest.TestCase):
             },
         )
         self.assertEqual(exceptions.status_code, 200)
-        self.assertIn("尚未人工确认", exceptions.content.decode("utf-8-sig"))
-
-        suggested = self.client.post(
-            "/api/coding/suggest",
-            json={"terms": [unique_terms[0]["term"]], "version": self.version, "mode": "both"},
-        )
-        self.assertEqual(suggested.status_code, 200)
-        suggestion_payload = suggested.json()
-        source_signature = suggestion_payload["source_signature"]
-        best = (suggestion_payload["suggestions"].get(unique_terms[0]["term"]) or {}).get("best") or {}
-        self.assertEqual(best.get("level"), "LLT")
-        llt_code = str(best["code"])
-        pt_code = str(best.get("parent_code") or best.get("pt_code") or llt_code)
-        # Prefer dictionary PT when the suggester exposes parents; otherwise resolve via validate.
-        validated = self.client.post(
-            "/api/coding/validate",
-            json={
-                "version": self.version,
-                "source_signature": source_signature,
-                "decisions": {
-                    f"{unique_terms[0]['coding_type']}|{unique_terms[0]['term']}": {
-                        "status": "accepted",
-                        "llt_code": llt_code,
-                        "pt_code": pt_code,
-                    }
-                },
+        exception_csv = exceptions.content.decode("utf-8-sig")
+        self.assertIn("尚未人工确认", exception_csv)
+        self.assertNotIn("LLT代码", exception_csv.splitlines()[0])
+        good_decisions = {
+            f"{unique_terms[0]['coding_type']}|{unique_terms[0]['term']}": {
+                "status": "accepted",
+                "pt_code": "10019211",
+                "llt_code": "10019211",
             },
-        )
-        self.assertEqual(validated.status_code, 200)
-        check = validated.json()["results"][f"{unique_terms[0]['coding_type']}|{unique_terms[0]['term']}"]
-        self.assertTrue(check["ok"], check)
-        resolved = check["codes"]
-
+        }
+        payload = {
+            "unique_terms": unique_terms,
+            "decisions": good_decisions,
+            "export_mode": "coded",
+            "dictionary_version": self.version,
+        }
+        missing = self.client.post("/api/coding/export", json=payload)
+        self.assertEqual(missing.status_code, 400)
+        self.assertEqual(missing.json()["detail"]["error"], "export_identity_required")
+        stale = self.client.post("/api/coding/export", json={**payload, "source_signature": "stale"})
+        self.assertEqual(stale.status_code, 409)
+        self.assertEqual(stale.json()["detail"]["error"], "index_identity_mismatch")
         accepted = self.client.post(
             "/api/coding/export",
-            json={
-                "unique_terms": unique_terms,
-                "decisions": {
-                    f"{unique_terms[0]['coding_type']}|{unique_terms[0]['term']}": {
-                        "status": "accepted",
-                        "pt_code": resolved["pt_code"],
-                        "llt_code": resolved["llt_code"],
-                    }
-                },
-                "export_mode": "coded",
-                "dictionary_version": self.version,
-                "source_signature": source_signature,
-            },
+            json={**payload, "source_signature": signature},
         )
         self.assertEqual(accepted.status_code, 200)
-        body = accepted.content.decode("utf-8-sig")
-        self.assertIn(resolved["llt_code"], body)
-        self.assertIn(source_signature, body)
+        self.assertIn("10019211", accepted.content.decode("utf-8-sig"))
+        self.assertIn(signature, accepted.content.decode("utf-8-sig"))
+
+    def test_stale_ready_job_is_not_returned_after_source_change(self) -> None:
+        config = default_source_config(self.version)
+        self.assertEqual(index_status_for_config(config)["state"], "ready")
+        with patch.object(MeddraIndexer, "is_current", return_value=False):
+            self.assertEqual(index_status_for_config(config)["state"], "pending")
 
     def test_running_reindex_status_takes_priority_over_existing_current_index(self) -> None:
         config = default_source_config(self.version)

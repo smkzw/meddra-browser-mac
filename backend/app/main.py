@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import base64
-from functools import lru_cache
+from functools import lru_cache, partial
 import json
 import os
 from pathlib import Path
@@ -20,18 +20,20 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from .coding import (
+    MAX_UNIQUE_TERMS,
     TermSuggester,
     build_export_bundle,
     code_to_csv,
     content_disposition_attachment,
     parse_data_listing_csv,
     parse_data_listing_excel,
-    validate_decision_against_store,
+    validate_coding_pair,
 )
 from .meddra_data import (
     ALL_SEARCH_LEVELS,
     MeddraIndexer,
     MeddraStore,
+    SourceConfig,
     add_source_root,
     default_source_config,
     discover_releases,
@@ -242,7 +244,7 @@ class CodingSuggestRequest(BaseModel):
 
 
 class CodingExportRequest(BaseModel):
-    unique_terms: list[dict[str, Any]]
+    unique_terms: list[dict[str, Any]] = Field(max_length=MAX_UNIQUE_TERMS)
     decisions: dict[str, dict[str, Any]] = Field(default_factory=dict)
     filename: str = "meddra_coded_listing.csv"
     # coded = formal confirmed rows only; exceptions = review exception list;
@@ -333,7 +335,9 @@ def index_status_for_config(config: Any, *, start: bool = False, force: bool = F
         if current and current.get("state") == "running":
             return public_index_status(current)
         if not start:
-            return public_index_status(current) if current else pending_index_status(config)
+            if current and current.get("state") == "error":
+                return public_index_status(current)
+            return pending_index_status(config)
         now = time.time()
         job = {
             "version": config.version,
@@ -423,7 +427,7 @@ def require_ready_store(version: Optional[str] = None) -> MeddraStore:
                 "index": status,
             },
         )
-    return store(version)
+    return store(config)
 
 
 def pick_dictionary_directory() -> Path | None:
@@ -480,13 +484,13 @@ def startup() -> None:
 
 
 @lru_cache(maxsize=8)
-def store(version: Optional[str] = None) -> MeddraStore:
-    return MeddraStore(default_source_config(version))
+def store(config: SourceConfig) -> MeddraStore:
+    return MeddraStore(config)
 
 
 @lru_cache(maxsize=8)
-def term_suggester(version: Optional[str] = None) -> TermSuggester:
-    return TermSuggester(store(version))
+def term_suggester(active_store: MeddraStore, source_signature: str) -> TermSuggester:
+    return TermSuggester(active_store)
 
 
 @app.get("/api/status")
@@ -740,9 +744,10 @@ def api_coding_suggest(payload: CodingSuggestRequest) -> dict[str, Any]:
         )
     try:
         active_store = require_ready_store(payload.version)
+        identity = active_store.index_identity()
         # Warm/reuse the per-version suggester so repeated batches do not
         # re-normalize the entire PT/LLT table.
-        suggester = term_suggester(active_store.config.version)
+        suggester = term_suggester(active_store, identity["source_signature"])
         suggestions = suggester.suggest_batch(
             payload.terms,
             mode=payload.mode,
@@ -752,7 +757,8 @@ def api_coding_suggest(payload: CodingSuggestRequest) -> dict[str, Any]:
         raise
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=500, detail=f"批量建议失败：{exc}") from exc
-    identity = active_store.index_identity()
+    current_identity = require_ready_store(identity["version"]).index_identity()
+    check_coding_index(current_identity, identity["version"], identity["source_signature"])
     # Suggestions are candidates only; clients must keep decisions pending until review.
     return {
         "suggestions": suggestions,
@@ -765,31 +771,34 @@ def api_coding_suggest(payload: CodingSuggestRequest) -> dict[str, Any]:
     }
 
 
+def check_coding_index(identity: dict[str, Any], version: str, signature: str) -> None:
+    if identity["source_signature"] != signature or identity["version"] != version:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": "index_identity_mismatch",
+                "message": "当前词典版本或索引已变更，请重新建议并复审",
+                "index_identity": identity,
+            },
+        )
+
+
 @app.post("/api/coding/validate")
 def api_coding_validate(payload: CodingValidateRequest) -> dict[str, Any]:
     if not payload.version or not payload.source_signature:
         raise HTTPException(
             status_code=400,
-            detail={
-                "error": "export_identity_required",
-                "message": "编码校验必须提供 version 与 source_signature",
-            },
+            detail={"error": "export_identity_required", "message": "编码校验需要词典版本和索引签名"},
         )
     active_store = require_ready_store(payload.version)
-    identity = active_store.index_identity()
-    if payload.source_signature != identity["source_signature"]:
-        raise HTTPException(
-            status_code=409,
-            detail={
-                "error": "index_identity_mismatch",
-                "message": "决定绑定的索引签名与当前就绪词典不一致，请重新建议并复审",
-                "index_identity": identity,
-            },
-        )
-    results: dict[str, Any] = {}
-    for key, decision in payload.decisions.items():
-        checked = validate_decision_against_store(active_store, decision or {})
-        results[key] = checked
+    with active_store.connect() as con:
+        con.execute("BEGIN")
+        identity = active_store.index_identity(con)
+        check_coding_index(identity, payload.version, payload.source_signature)
+        lookup = partial(active_store.term_by_code, con=con)
+        results = {key: validate_coding_pair(lookup, decision) for key, decision in payload.decisions.items()}
+    current_identity = require_ready_store(payload.version).index_identity()
+    check_coding_index(current_identity, payload.version, payload.source_signature)
     return {
         "version": identity["version"],
         "source_signature": identity["source_signature"],
@@ -805,43 +814,32 @@ def api_coding_export(payload: CodingExportRequest) -> Response:
     export_mode = (payload.export_mode or "coded").strip().lower()
     if export_mode not in {"coded", "exceptions", "both"}:
         raise HTTPException(status_code=400, detail="export_mode 仅支持 coded / exceptions / both")
-    dictionary_version = ""
-    source_signature = ""
-    ready_store = None
-    formal_export = export_mode in {"coded", "both"}
-    if formal_export:
-        # Formal coded listings must bind version + source signature and resolve
-        # every confirmed decision against that exact ready index.
-        if not (payload.dictionary_version and payload.source_signature):
-            raise HTTPException(
-                status_code=400,
-                detail={
-                    "error": "export_identity_required",
-                    "message": "正式编码导出必须提供 dictionary_version 与 source_signature",
-                },
-            )
-    if formal_export or payload.dictionary_version or payload.source_signature:
-        ready_store = require_ready_store(payload.dictionary_version)
-        identity = ready_store.index_identity()
-        dictionary_version = identity["version"]
-        source_signature = identity["source_signature"]
-        if payload.source_signature and payload.source_signature != source_signature:
-            raise HTTPException(
-                status_code=409,
-                detail={
-                    "error": "index_identity_mismatch",
-                    "message": "导出绑定的索引签名与当前就绪词典不一致",
-                    "index_identity": identity,
-                },
-            )
+    dictionary_version = payload.dictionary_version or ""
+    source_signature = payload.source_signature or ""
     try:
-        bundle = build_export_bundle(
-            payload.unique_terms,
-            payload.decisions,
-            dictionary_version=dictionary_version,
-            store=ready_store,
-            source_signature=source_signature,
-        )
+        if export_mode == "exceptions":
+            bundle = build_export_bundle(payload.unique_terms, payload.decisions)
+            dictionary_version = source_signature = ""
+        else:
+            if not dictionary_version or not source_signature:
+                raise HTTPException(
+                    status_code=400,
+                    detail={"error": "export_identity_required", "message": "正式导出需要词典版本和索引签名"},
+                )
+            ready_store = require_ready_store(dictionary_version)
+            with ready_store.connect() as con:
+                con.execute("BEGIN")
+                check_coding_index(ready_store.index_identity(con), dictionary_version, source_signature)
+                lookup = lru_cache(maxsize=4096)(partial(ready_store.term_by_code, con=con))
+                bundle = build_export_bundle(
+                    payload.unique_terms,
+                    payload.decisions,
+                    dictionary_version=dictionary_version,
+                    lookup=lookup,
+                    source_signature=source_signature,
+                )
+            current_identity = require_ready_store(dictionary_version).index_identity()
+            check_coding_index(current_identity, dictionary_version, source_signature)
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     if export_mode == "coded":
@@ -864,7 +862,7 @@ def api_coding_export(payload: CodingExportRequest) -> Response:
         default_name = "meddra_coding_export.csv"
         if not rows:
             raise HTTPException(status_code=409, detail={"error": "empty_export", "stats": bundle["stats"]})
-    csv_text = code_to_csv(rows)
+    csv_text = code_to_csv(rows, include_coding=export_mode != "exceptions")
     if csv_text and not csv_text.startswith("\ufeff"):
         csv_text = f"\ufeff{csv_text}"
     return Response(
