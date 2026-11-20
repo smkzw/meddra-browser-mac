@@ -22,7 +22,13 @@ private final class MedDRAApp: NSObject, NSApplicationDelegate, NSWindowDelegate
     private var session: URL?
     private var exiting = false
     private var closing = false
-    private var saves: [ObjectIdentifier: (staged: URL, final: URL)] = [:]
+    private struct SaveJob {
+        let staged: URL
+        let final: URL
+        let requestURL: String
+    }
+
+    private var saves: [ObjectIdentifier: SaveJob] = [:]
 
     private var state: URL {
         if let override = ProcessInfo.processInfo.environment["MEDDRA_BROWSER_STATE_DIR"] {
@@ -335,6 +341,22 @@ private final class MedDRAApp: NSObject, NSApplicationDelegate, NSWindowDelegate
         }
     }
 
+    func webView(_ view: WKWebView, runOpenPanelWith parameters: WKOpenPanelParameters,
+                 initiatedByFrame frame: WKFrameInfo, completionHandler: @escaping ([URL]?) -> Void) {
+        guard frame.isMainFrame, isLocal(frame.request.url) else {
+            completionHandler(nil)
+            return
+        }
+        let panel = NSOpenPanel()
+        panel.prompt = "导入"
+        panel.canChooseFiles = !parameters.allowsDirectories
+        panel.canChooseDirectories = parameters.allowsDirectories
+        panel.allowsMultipleSelection = parameters.allowsMultipleSelection
+        panel.beginSheetModal(for: window) { response in
+            completionHandler(response == .OK ? panel.urls : nil)
+        }
+    }
+
     func webView(_ view: WKWebView, decidePolicyFor action: WKNavigationAction,
                  decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
         if action.shouldPerformDownload, isLocal(action.sourceFrame.request.url) {
@@ -370,7 +392,8 @@ private final class MedDRAApp: NSObject, NSApplicationDelegate, NSWindowDelegate
                 return
             }
             let staged = destination.deletingLastPathComponent().appendingPathComponent(".meddra-\(UUID().uuidString).tmp")
-            self.saves[ObjectIdentifier(download)] = (staged, destination)
+            let requestURL = download.originalRequest?.url?.absoluteString ?? response.url?.absoluteString ?? ""
+            self.saves[ObjectIdentifier(download)] = SaveJob(staged: staged, final: destination, requestURL: requestURL)
             completionHandler(staged)
         }
     }
@@ -385,6 +408,10 @@ private final class MedDRAApp: NSObject, NSApplicationDelegate, NSWindowDelegate
             } else {
                 try files.moveItem(at: job.staged, to: job.final)
             }
+            webView?.callAsyncJavaScript(
+                "window.dispatchEvent(new CustomEvent('meddra:native-download-saved', { detail: requestURL }));",
+                arguments: ["requestURL": job.requestURL], in: nil, in: .page, completionHandler: nil
+            )
         } catch {
             presentError("无法保存导出文件。\n\(error.localizedDescription)")
         }

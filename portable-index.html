@@ -108,6 +108,7 @@
       try {
         const response = await fetch(url + "api/runtime-info", {
           cache: "no-store",
+          redirect: "error",
           credentials: "omit",
           signal: controller.signal,
         });

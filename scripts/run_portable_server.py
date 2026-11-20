@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import asyncio
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
+import http.client
 import json
 import os
 from pathlib import Path
@@ -12,8 +13,6 @@ import socket
 import sys
 import threading
 import time
-import urllib.error
-import urllib.request
 import uuid
 import webbrowser
 
@@ -96,12 +95,15 @@ def portable_url() -> str | None:
         if not 1 <= port <= 65535:
             return None
         url = f"http://{HOST}:{port}/"
-        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-        with opener.open(f"{url}api/runtime-info", timeout=0.5) as response:
-            current = json.load(response)
-        if current.get("distribution_mode") == "portable" and current.get("instance_id") == hint["instance_id"]:
+        with closing(http.client.HTTPConnection(HOST, port, timeout=0.5)) as client:
+            client.request("GET", "/api/runtime-info")
+            response = client.getresponse()
+            if response.status != 200:
+                return None
+            current = json.loads(response.read(4096))
+        if isinstance(current, dict) and current.get("distribution_mode") == "portable" and current.get("instance_id") == hint["instance_id"]:
             return url
-    except (OSError, ValueError, TypeError, KeyError):
+    except (OSError, ValueError, TypeError, KeyError, http.client.HTTPException):
         pass
     return None
 
