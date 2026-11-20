@@ -12,16 +12,16 @@ import sys
 import threading
 import time
 from typing import Any, Optional
+from urllib.parse import urlparse
 
 from fastapi import FastAPI, HTTPException, Query, Request, Response
-from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from .coding import (
     TermSuggester,
-    build_export_rows,
+    build_export_bundle,
     code_to_csv,
     parse_data_listing_csv,
     parse_data_listing_excel,
@@ -40,38 +40,86 @@ from .meddra_data import (
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 FRONTEND_DIST = PROJECT_ROOT / "frontend" / "dist"
+ALLOWED_LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1", "[::1]", "testserver"})
 
 app = FastAPI(title="MedDRA Browser", version="0.2.0")
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173", "null"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
 if (FRONTEND_DIST / "assets").exists():
     app.mount("/assets", StaticFiles(directory=FRONTEND_DIST / "assets"), name="assets")
 
 
+def _request_hostname(host_header: str) -> str:
+    host = (host_header or "").strip().lower()
+    if host.startswith("[") and "]" in host:
+        return host[1 : host.index("]")]
+    return host.split(":", 1)[0]
+
+
+def _host_allowed(host_header: str) -> bool:
+    hostname = _request_hostname(host_header)
+    return hostname in ALLOWED_LOOPBACK_HOSTS or hostname.endswith(".localhost")
+
+
+def _origin_hostname(origin: str) -> str | None:
+    if not origin or origin == "null":
+        return None
+    try:
+        parsed = urlparse(origin)
+    except ValueError:
+        return None
+    if parsed.scheme not in {"http", "https"}:
+        return None
+    return (parsed.hostname or "").lower() or None
+
+
+def _is_runtime_info_path(path: str) -> bool:
+    return path.rstrip("/") == "/api/runtime-info"
+
+
+def _origin_permitted(request: Request) -> bool:
+    origin = request.headers.get("origin")
+    if origin is None:
+        return True
+    if origin == "null":
+        # file:// portable discovery may probe runtime-info only.
+        return _is_runtime_info_path(request.url.path) and request.method in {"GET", "HEAD", "OPTIONS"}
+    hostname = _origin_hostname(origin)
+    if hostname is None:
+        return False
+    # Same-origin local UI, Vite proxy, or another loopback front-end.
+    return hostname in ALLOWED_LOOPBACK_HOSTS or hostname.endswith(".localhost")
+
+
+def _runtime_info_cors_headers(request: Request) -> dict[str, str]:
+    origin = request.headers.get("origin") or "null"
+    headers = {
+        "Access-Control-Allow-Origin": "null" if origin == "null" else origin,
+        "Access-Control-Allow-Methods": "GET, OPTIONS",
+        "Access-Control-Allow-Headers": request.headers.get("access-control-request-headers") or "Content-Type",
+        "Access-Control-Allow-Private-Network": "true",
+        "Cache-Control": "no-store",
+        "Vary": "Origin",
+    }
+    # Never allow credentials on the restricted discovery surface.
+    return headers
+
+
 @app.middleware("http")
-async def allow_private_network_access(request: Request, call_next):  # type: ignore[no-untyped-def]
-    requested = request.headers.get("access-control-request-private-network", "").lower() == "true"
-    if request.method == "OPTIONS" and requested:
-        origin = request.headers.get("origin") or "null"
-        return Response(
-            status_code=200,
-            headers={
-                "Access-Control-Allow-Origin": origin,
-                "Access-Control-Allow-Methods": request.headers.get("access-control-request-method", "GET"),
-                "Access-Control-Allow-Headers": request.headers.get("access-control-request-headers", "*"),
-                "Access-Control-Allow-Private-Network": "true",
-                "Access-Control-Allow-Credentials": "true",
-                "Cache-Control": "no-store",
-            },
-        )
+async def local_access_guard(request: Request, call_next):  # type: ignore[no-untyped-def]
+    if not _host_allowed(request.headers.get("host", "")):
+        return JSONResponse(status_code=403, content={"error": "host_not_allowed", "detail": "仅允许本机回环访问"})
+    if request.url.path.startswith("/api/") and not _origin_permitted(request):
+        return JSONResponse(status_code=403, content={"error": "origin_not_allowed", "detail": "禁止跨站访问本地 API"})
+
+    if request.method == "OPTIONS" and _is_runtime_info_path(request.url.path):
+        origin = request.headers.get("origin")
+        if origin == "null" or request.headers.get("access-control-request-private-network", "").lower() == "true":
+            return Response(status_code=204, headers=_runtime_info_cors_headers(request))
+        return Response(status_code=403)
+
     response = await call_next(request)
-    if requested or request.url.path.startswith("/api/runtime-info"):
-        response.headers["Access-Control-Allow-Private-Network"] = "true"
+    if _is_runtime_info_path(request.url.path) and (request.headers.get("origin") == "null" or request.method == "OPTIONS"):
+        for key, value in _runtime_info_cors_headers(request).items():
+            response.headers[key] = value
     return response
 
 
@@ -148,6 +196,10 @@ class CodingExportRequest(BaseModel):
     unique_terms: list[dict[str, Any]]
     decisions: dict[str, dict[str, Any]] = Field(default_factory=dict)
     filename: str = "meddra_coded_listing.csv"
+    # coded = formal confirmed rows only; exceptions = review exception list;
+    # both = coded rows followed by an exception section.
+    export_mode: str = Field(default="coded")
+    dictionary_version: Optional[str] = None
 
 
 def index_job_key(config: Any) -> str:
@@ -212,15 +264,18 @@ def index_status_for_config(config: Any, *, start: bool = False, force: bool = F
     if not force and indexer.is_current():
         with INDEX_LOCK:
             current = INDEX_JOBS.get(key)
+            if current and current.get("state") == "running":
+                return public_index_status(current)
             if current and current.get("state") == "ready":
                 return public_index_status(current)
-        status = ready_index_status(config)
-        with INDEX_LOCK:
+            status = ready_index_status(config)
             INDEX_JOBS[key] = status
-        return status
+            return status
 
     with INDEX_LOCK:
         current = INDEX_JOBS.get(key)
+        if current and current.get("state") == "running":
+            return public_index_status(current)
         if not start:
             return public_index_status(current) if current else pending_index_status(config)
         now = time.time()
@@ -368,30 +423,52 @@ def api_status(version: Optional[str] = Query(default=None)) -> dict[str, Any]:
     return require_ready_store(version).status()
 
 
-_RUNTIME_CALLBACK_RE = re.compile(r"^[A-Za-z_$][A-Za-z0-9_$]*$")
-
-
-@app.get("/api/runtime-info")
-def api_runtime_info(callback: Optional[str] = Query(default=None)) -> Any:
+def runtime_identity_payload() -> dict[str, Any]:
     app_store_mode = os.environ.get("MEDDRA_APP_STORE_MODE") == "1"
     distribution_mode = os.environ.get("MEDDRA_DISTRIBUTION_MODE", "local")
     if app_store_mode:
         distribution_mode = "app_store_candidate"
-    payload = {
+    instance_id = (os.environ.get("MEDDRA_INSTANCE_ID") or "").strip()
+    shutdown_available = callable(getattr(app.state, "request_shutdown", None))
+    return {
         "app_name": "MedDRA Browser",
         "version": app.version,
         "app_store_mode": app_store_mode,
         "distribution_mode": distribution_mode,
+        "instance_id": instance_id,
+        "shutdown_available": shutdown_available,
     }
-    if callback is not None:
-        if not _RUNTIME_CALLBACK_RE.fullmatch(callback):
-            raise HTTPException(status_code=400, detail="无效的运行状态回调名称")
-        return Response(
-            content=f"{callback}({json.dumps(payload, ensure_ascii=False, separators=(',', ':'))});",
-            media_type="application/javascript",
-            headers={"Cache-Control": "no-store"},
-        )
-    return payload
+
+
+@app.get("/api/runtime-info")
+def api_runtime_info() -> dict[str, Any]:
+    # Intentionally JSON-only: portable file:// discovery uses a sidecar or this
+    # restricted GET. JSONP is rejected because it would execute in a foreign page.
+    return runtime_identity_payload()
+
+
+@app.post("/api/runtime/shutdown")
+async def api_runtime_shutdown(request: Request) -> dict[str, Any]:
+    origin = request.headers.get("origin")
+    if origin == "null":
+        raise HTTPException(status_code=403, detail="file:// 来源不得请求关闭服务")
+    if origin is not None and not _origin_permitted(request):
+        raise HTTPException(status_code=403, detail="跨站来源不得请求关闭服务")
+    content_type = (request.headers.get("content-type") or "").split(";", 1)[0].strip().lower()
+    if content_type and content_type not in {"application/json", ""}:
+        raise HTTPException(status_code=415, detail="shutdown 仅接受 JSON")
+    if content_type == "application/json":
+        body = await request.body()
+        if body.strip() not in {b"", b"{}", b"null"}:
+            try:
+                json.loads(body.decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                raise HTTPException(status_code=400, detail="shutdown 请求体不是有效 JSON") from exc
+    shutdown = getattr(app.state, "request_shutdown", None)
+    if not callable(shutdown):
+        raise HTTPException(status_code=409, detail="当前运行环境未安装关闭回调")
+    shutdown()
+    return {"status": "stopping"}
 
 
 @app.get("/api/index-status")
@@ -573,9 +650,17 @@ def api_coding_import(payload: CodingImportRequest) -> dict[str, Any]:
 @app.post("/api/coding/suggest")
 def api_coding_suggest(payload: CodingSuggestRequest) -> dict[str, Any]:
     if not payload.terms:
-        return {"suggestions": {}, "count": 0}
+        return {"suggestions": {}, "count": 0, "version": payload.version, "status": "suggested"}
     if len(payload.terms) > 2000:
-        raise HTTPException(status_code=400, detail="一次最多建议 2000 个唯一术语")
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": "suggest_batch_too_large",
+                "message": "一次最多建议 2000 个唯一术语，请前端分块提交",
+                "max_terms": 2000,
+                "received": len(payload.terms),
+            },
+        )
     try:
         active_store = require_ready_store(payload.version)
         suggester = TermSuggester(active_store)
@@ -588,20 +673,63 @@ def api_coding_suggest(payload: CodingSuggestRequest) -> dict[str, Any]:
         raise
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=500, detail=f"批量建议失败：{exc}") from exc
-    return {"suggestions": suggestions, "count": len(suggestions)}
+    # Suggestions are candidates only; clients must keep decisions pending until review.
+    return {
+        "suggestions": suggestions,
+        "count": len(suggestions),
+        "version": active_store.config.version,
+        "available_languages": [
+            lang
+            for lang, path in [("en", active_store.config.english_dir), ("zh", active_store.config.chinese_dir)]
+            if path is not None
+        ],
+        "auto_accept": False,
+    }
 
 
 @app.post("/api/coding/export")
 def api_coding_export(payload: CodingExportRequest) -> Response:
-    rows = build_export_rows(payload.unique_terms, payload.decisions)
+    export_mode = (payload.export_mode or "coded").strip().lower()
+    if export_mode not in {"coded", "exceptions", "both"}:
+        raise HTTPException(status_code=400, detail="export_mode 仅支持 coded / exceptions / both")
+    if payload.dictionary_version:
+        # Bind the export request to a ready index version so stale UI sessions
+        # cannot silently ship codes against a different dictionary.
+        require_ready_store(payload.dictionary_version)
+    bundle = build_export_bundle(payload.unique_terms, payload.decisions)
+    if export_mode == "coded":
+        rows = bundle["coded_rows"]
+        default_name = "meddra_coded_listing.csv"
+        if not rows:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "error": "no_confirmed_codes",
+                    "message": "没有已人工确认的编码行可导出；pending/rejected 请改用 export_mode=exceptions",
+                    "stats": bundle["stats"],
+                },
+            )
+    elif export_mode == "exceptions":
+        rows = bundle["exception_rows"]
+        default_name = "meddra_coding_exceptions.csv"
+    else:
+        rows = list(bundle["coded_rows"]) + list(bundle["exception_rows"])
+        default_name = "meddra_coding_export.csv"
+        if not rows:
+            raise HTTPException(status_code=409, detail={"error": "empty_export", "stats": bundle["stats"]})
     csv_text = code_to_csv(rows)
-    filename = safe_download_filename(payload.filename, "meddra_coded_listing.csv")
+    filename = safe_download_filename(payload.filename, default_name)
     if csv_text and not csv_text.startswith("\ufeff"):
         csv_text = f"\ufeff{csv_text}"
     return Response(
         content=csv_text,
         media_type="text/csv; charset=utf-8",
-        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
+            "X-MedDRA-Export-Mode": export_mode,
+            "X-MedDRA-Coded-Rows": str(bundle["stats"]["coded_row_count"]),
+            "X-MedDRA-Exception-Rows": str(bundle["stats"]["exception_row_count"]),
+        },
     )
 
 

@@ -89,6 +89,21 @@ class MeddraDataTests(unittest.TestCase):
             self.assertEqual(release.available_languages, ("en",))
             self.assertEqual(release.missing_languages, ("zh",))
 
+    def test_same_version_duplicate_sources_prefer_medascii_and_flag_conflict(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            preferred = root / "MedDRA_30_2_English" / "MedAscii"
+            duplicate = root / "copies" / "MedDRA_30_2_English" / "flat-ascii"
+            for base in (preferred, duplicate):
+                base.mkdir(parents=True)
+                for file_name in REQUIRED_ASC_FILES:
+                    (base / file_name).write_text("10000001$Term$\n", encoding="utf-8")
+            releases = {row.version: row for row in discover_releases(root)}
+            self.assertIn("30.2", releases)
+            self.assertEqual(releases["30.2"].english_dir, preferred)
+            self.assertIn("en", releases["30.2"].source_conflicts)
+            self.assertIn("source_conflicts", releases["30.2"].as_dict())
+
     def test_synonym_lookup_stays_inside_selected_root(self) -> None:
         with TemporaryDirectory() as tmp:
             workspace = Path(tmp)

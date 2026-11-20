@@ -14,6 +14,7 @@ if not os.environ.get("MEDDRA_SOURCE_ROOT"):
 
 from app.main import INDEX_JOBS, INDEX_LOCK, app, index_job_key, index_status_for_config
 from app.meddra_data import MeddraIndexer, default_source_config
+import base64
 
 
 class ApiManualCoverageTests(unittest.TestCase):
@@ -57,20 +58,44 @@ class ApiManualCoverageTests(unittest.TestCase):
         self.assertTrue(candidate["app_store_mode"])
         self.assertEqual(candidate["distribution_mode"], "app_store_candidate")
 
-    def test_runtime_info_supports_file_entry_jsonp_probe(self) -> None:
+    def test_runtime_info_is_json_only_with_instance_identity(self) -> None:
         with patch.dict(
             os.environ,
-            {"MEDDRA_APP_STORE_MODE": "0", "MEDDRA_DISTRIBUTION_MODE": "portable"},
+            {
+                "MEDDRA_APP_STORE_MODE": "0",
+                "MEDDRA_DISTRIBUTION_MODE": "portable",
+                "MEDDRA_INSTANCE_ID": "portable-instance-1",
+            },
             clear=False,
         ):
             response = self.client.get("/api/runtime-info", params={"callback": "__meddraProbe1"})
         self.assertEqual(response.status_code, 200)
-        self.assertIn("application/javascript", response.headers["content-type"])
-        self.assertTrue(response.text.startswith("__meddraProbe1("))
-        self.assertIn('"distribution_mode":"portable"', response.text)
+        self.assertIn("application/json", response.headers["content-type"])
+        payload = response.json()
+        self.assertEqual(payload["distribution_mode"], "portable")
+        self.assertEqual(payload["instance_id"], "portable-instance-1")
+        self.assertIn("shutdown_available", payload)
+        self.assertNotIn("path", payload)
+        self.assertFalse(response.text.startswith("__meddraProbe1("))
 
-        invalid = self.client.get("/api/runtime-info", params={"callback": "alert(1)"})
-        self.assertEqual(invalid.status_code, 400)
+    def test_runtime_shutdown_requires_installed_callback(self) -> None:
+        missing = self.client.post("/api/runtime/shutdown", headers={"Content-Type": "application/json"}, content=b"{}")
+        self.assertEqual(missing.status_code, 409)
+        calls: list[str] = []
+        app.state.request_shutdown = lambda: calls.append("stop")  # type: ignore[attr-defined]
+        try:
+            ok = self.client.post("/api/runtime/shutdown", headers={"Content-Type": "application/json"}, content=b"{}")
+            self.assertEqual(ok.status_code, 200)
+            self.assertEqual(ok.json(), {"status": "stopping"})
+            self.assertEqual(calls, ["stop"])
+        finally:
+            delattr(app.state, "request_shutdown")
+
+    def test_cross_site_api_and_non_loopback_host_are_blocked(self) -> None:
+        blocked = self.client.get("/api/releases", headers={"Origin": "https://evil.example"})
+        self.assertEqual(blocked.status_code, 403)
+        host_blocked = self.client.get("/api/runtime-info", headers={"Host": "evil.example"})
+        self.assertEqual(host_blocked.status_code, 403)
 
     def test_search_categories_code_and_soc_filter(self) -> None:
         exact = self.client.post(
@@ -256,6 +281,48 @@ class ApiManualCoverageTests(unittest.TestCase):
             result = self.client.get("/api/tree/soc", params={"version": self.version})
         self.assertEqual(result.status_code, 425)
         self.assertEqual(result.json()["detail"]["error"], "index_not_ready")
+
+    def test_coding_export_blocks_unconfirmed_suggestion_codes(self) -> None:
+        listing = "表单编号,受试者编号,不良事件名称(AETERM)\nAE,001,头痛\n".encode("utf-8")
+        imported = self.client.post(
+            "/api/coding/import",
+            json={"filename": "ae.csv", "content_base64": base64.b64encode(listing).decode("ascii")},
+        )
+        self.assertEqual(imported.status_code, 200)
+        unique_terms = imported.json()["unique_terms"]
+        blocked = self.client.post(
+            "/api/coding/export",
+            json={"unique_terms": unique_terms, "decisions": {}, "export_mode": "coded"},
+        )
+        self.assertEqual(blocked.status_code, 409)
+        exceptions = self.client.post(
+            "/api/coding/export",
+            json={
+                "unique_terms": unique_terms,
+                "decisions": {},
+                "export_mode": "exceptions",
+                "filename": "exceptions.csv",
+            },
+        )
+        self.assertEqual(exceptions.status_code, 200)
+        self.assertIn("尚未人工确认", exceptions.content.decode("utf-8-sig"))
+        accepted = self.client.post(
+            "/api/coding/export",
+            json={
+                "unique_terms": unique_terms,
+                "decisions": {
+                    f"{unique_terms[0]['coding_type']}|{unique_terms[0]['term']}": {
+                        "status": "accepted",
+                        "pt_code": "10019211",
+                        "llt_code": "10019211",
+                    }
+                },
+                "export_mode": "coded",
+                "dictionary_version": self.version,
+            },
+        )
+        self.assertEqual(accepted.status_code, 200)
+        self.assertIn("10019211", accepted.content.decode("utf-8-sig"))
 
     def test_running_reindex_status_takes_priority_over_existing_current_index(self) -> None:
         config = default_source_config(self.version)

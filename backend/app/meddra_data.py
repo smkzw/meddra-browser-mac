@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+from collections import deque
 from contextlib import contextmanager
 import io
 import json
@@ -26,7 +27,7 @@ else:
 
 LEVELS = ["SOC", "HLGT", "HLT", "PT", "LLT"]
 ALL_SEARCH_LEVELS = [*LEVELS, "SMQ"]
-INDEX_SIGNATURE_VERSION = "0.1.4-source-signature-v1"
+INDEX_SIGNATURE_VERSION = "0.1.5-source-signature-v1"
 REQUIRED_ASC_FILES = {
     "soc.asc",
     "hlgt.asc",
@@ -128,6 +129,7 @@ class ReleaseInfo:
     version: str
     english_dir: Path | None
     chinese_dir: Path | None
+    source_conflicts: tuple[str, ...] = ()
 
     @property
     def complete(self) -> bool:
@@ -156,13 +158,16 @@ class ReleaseInfo:
         return bool(self.available_languages)
 
     def as_dict(self) -> dict[str, Any]:
-        return {
+        payload = {
             "version": self.version,
             "complete": self.complete,
             "usable": self.usable,
             "available_languages": list(self.available_languages),
             "missing_languages": list(self.missing_languages),
         }
+        if self.source_conflicts:
+            payload["source_conflicts"] = list(self.source_conflicts)
+        return payload
 
 
 @dataclass(frozen=True)
@@ -429,9 +434,22 @@ def source_roots_status() -> list[dict[str, Any]]:
     return rows
 
 
+def dictionary_preference_key(path: Path) -> tuple[Any, ...]:
+    """Stable preference for the same version+language from multiple folders.
+
+    Prefer official MedAscii/ascii-* leaves, then shallower paths, then path text.
+    Configured source-root order still wins because discovery walks roots in order
+    and only replaces an existing pick when the new path scores strictly better.
+    """
+    name = path.name.lower()
+    leaf_score = 0 if name in {"medascii"} or name.startswith("ascii") else 1
+    return (leaf_score, len(path.parts), str(path).lower())
+
+
 def discover_releases(root: Path | None = None) -> list[ReleaseInfo]:
     roots = configured_source_roots(root) if root is None else [root.expanduser()]
     by_version: dict[str, dict[str, Path]] = {}
+    conflicts: dict[str, set[str]] = {}
     for med_root in roots:
         if not med_root.exists():
             continue
@@ -445,9 +463,23 @@ def discover_releases(root: Path | None = None) -> list[ReleaseInfo]:
             version = infer_version(base)
             if not lang or not version:
                 continue
-            by_version.setdefault(version, {}).setdefault(lang, base)
+            current = by_version.setdefault(version, {})
+            existing = current.get(lang)
+            if existing is None:
+                current[lang] = base
+                continue
+            if existing == base:
+                continue
+            conflicts.setdefault(version, set()).add(lang)
+            if dictionary_preference_key(base) < dictionary_preference_key(existing):
+                current[lang] = base
     releases = [
-        ReleaseInfo(version=item, english_dir=paths.get("en"), chinese_dir=paths.get("zh"))
+        ReleaseInfo(
+            version=item,
+            english_dir=paths.get("en"),
+            chinese_dir=paths.get("zh"),
+            source_conflicts=tuple(sorted(conflicts.get(item, ()))),
+        )
         for item, paths in by_version.items()
     ]
     return sorted(releases, key=lambda row: version_key(row.version), reverse=True)
@@ -457,10 +489,10 @@ def iter_dictionary_dirs(root: Path) -> Iterable[Path]:
     if (root / "soc.asc").exists():
         yield root
         return
-    stack: list[tuple[Path, int]] = [(root, 0)]
+    queue: deque[tuple[Path, int]] = deque([(root, 0)])
     seen = 0
-    while stack:
-        current, depth = stack.pop()
+    while queue:
+        current, depth = queue.popleft()
         seen += 1
         if seen > MAX_DICTIONARY_WALK_DIRS or depth > MAX_DICTIONARY_WALK_DEPTH:
             continue
@@ -468,7 +500,7 @@ def iter_dictionary_dirs(root: Path) -> Iterable[Path]:
             if (current / "soc.asc").exists():
                 yield current
                 continue
-            children = list(current.iterdir())
+            children = sorted(current.iterdir(), key=lambda item: item.name.lower())
         except (OSError, PermissionError):
             continue
         if depth >= MAX_DICTIONARY_WALK_DEPTH:
@@ -479,7 +511,7 @@ def iter_dictionary_dirs(root: Path) -> Iterable[Path]:
                     continue
             except (OSError, PermissionError):
                 continue
-            stack.append((child, depth + 1))
+            queue.append((child, depth + 1))
 
 
 def select_release(releases: list[ReleaseInfo], version: str | None = None) -> ReleaseInfo:
@@ -849,10 +881,14 @@ class MeddraIndexer:
         return bool(row and row[0] == self._source_signature())
 
     def _write_metadata(self, con: sqlite3.Connection) -> None:
-        con.execute(
-            "insert or replace into index_metadata values (?, ?)",
+        languages = ",".join(lang for lang, _base in self._language_dirs())
+        rows = [
             ("source_signature", self._source_signature()),
-        )
+            ("index_signature_version", INDEX_SIGNATURE_VERSION),
+            ("meddra_version", self.config.version),
+            ("available_languages", languages),
+        ]
+        con.executemany("insert or replace into index_metadata values (?, ?)", rows)
 
     def _delete_index(self, db_path: Path | None = None) -> None:
         target = db_path or self.config.db_path
@@ -1327,6 +1363,12 @@ class MeddraIndexer:
             "insert into terms_fts(rowid, level, code, en_name, zh_name) "
             "select rowid, level, code, coalesce(en_name,''), coalesce(zh_name,'') from terms"
         )
+        term_count = int(con.execute("select count(*) from terms").fetchone()[0])
+        fts_count = int(con.execute("select count(*) from terms_fts").fetchone()[0])
+        if term_count != fts_count:
+            raise RuntimeError(
+                f"全文索引行数与术语表不一致（terms={term_count}, fts={fts_count}），已中止本次索引构建"
+            )
 
 
 class MeddraStore:
@@ -1740,6 +1782,8 @@ class MeddraStore:
         }
 
     def export_csv(self, rows: Iterable[dict[str, Any]]) -> str:
+        from .coding import csv_safe_cell
+
         materialized = list(rows)
         output = io.StringIO()
         if not materialized:
@@ -1752,7 +1796,7 @@ class MeddraStore:
         writer = csv.DictWriter(output, fieldnames=fieldnames, extrasaction="ignore")
         writer.writeheader()
         for row in materialized:
-            writer.writerow({key: row.get(key, "") for key in fieldnames})
+            writer.writerow({key: csv_safe_cell(row.get(key, "")) for key in fieldnames})
         return output.getvalue()
 
     def _search_response(

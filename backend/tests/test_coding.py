@@ -9,8 +9,10 @@ from tempfile import TemporaryDirectory
 from openpyxl import Workbook
 
 from app.coding import (
+    build_export_bundle,
     build_export_rows,
     code_to_csv,
+    csv_safe_cell,
     parse_data_listing_csv,
     parse_data_listing_excel,
     safe_download_filename,
@@ -93,6 +95,41 @@ class CodingListingTests(unittest.TestCase):
         csv_text = code_to_csv(rows)
         self.assertIn("头痛", csv_text)
         self.assertIn("PT代码", csv_text)
+
+    def test_export_requires_human_confirmation_and_strips_suggestion_codes(self) -> None:
+        unique_terms = [
+            {
+                "term": "头痛",
+                "coding_type": "AE",
+                "count": 1,
+                "occurrences": [{"受试者编号": "001"}],
+                "suggestion": {
+                    "best": {"level": "LLT", "code": "10019211", "zh_name": "头痛", "en_name": "Headache", "match_type": "exact", "score": 100},
+                },
+            }
+        ]
+        pending = build_export_bundle(unique_terms, {})
+        self.assertEqual(pending["coded_rows"], [])
+        self.assertEqual(pending["exception_rows"][0]["编码状态"], "pending")
+        self.assertEqual(pending["exception_rows"][0]["LLT代码"], "")
+
+        rejected = build_export_bundle(unique_terms, {"AE|头痛": {"status": "rejected", "llt_code": "10019211"}})
+        self.assertEqual(rejected["coded_rows"], [])
+        self.assertEqual(rejected["exception_rows"][0]["LLT代码"], "")
+        self.assertIn("拒绝", rejected["exception_rows"][0]["审阅异常原因"])
+
+        accepted = build_export_bundle(
+            unique_terms,
+            {"AE|头痛": {"status": "accepted", "pt_code": "10019211", "llt_code": "10019211"}},
+        )
+        self.assertEqual(len(accepted["coded_rows"]), 1)
+        self.assertEqual(accepted["exception_rows"], [])
+
+    def test_csv_formula_cells_are_neutralized(self) -> None:
+        self.assertEqual(csv_safe_cell("=cmd|'/c calc'!A0"), "'=cmd|'/c calc'!A0")
+        text = code_to_csv([{"原文术语": "=1+2", "编码状态": "accepted", "PT代码": "+1234"}])
+        self.assertIn("'=1+2", text)
+        self.assertIn("'+1234", text)
 
     def test_import_payload_shape(self) -> None:
         # Ensure the shape used by the HTTP layer is stable.
