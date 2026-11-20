@@ -13,7 +13,15 @@ trap 'rm -rf "$STAGING"' EXIT
 PACKAGE="$STAGING/meddra-browser-portable"
 scripts/copy_bundle_payload.sh "$PACKAGE"
 cp scripts/start_meddra_server.sh "$PACKAGE/scripts/"
-cp start_windows.bat "$PACKAGE/【Windows】第一步：请双击我运行.bat"
+# cmd.exe requires stable line endings and parses startup scripts before
+# Python can select UTF-8. Keep the batch commands ASCII and emit DOS lines.
+python3 - "$PACKAGE/【Windows】第一步：请双击我运行.bat" <<'PYBAT'
+from pathlib import Path
+import sys
+
+source = Path("start_windows.bat").read_text(encoding="ascii")
+Path(sys.argv[1]).write_bytes(source.replace("\n", "\r\n").encode("ascii"))
+PYBAT
 cp portable-index.html "$PACKAGE/第二步：双击我开始MedDRA浏览.html"
 cp README.md "$PACKAGE/"
 python3 scripts/build_runtime.py "$PACKAGE/tools/python" macos-arm64 macos-x86_64 windows-x86_64

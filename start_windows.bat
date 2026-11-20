@@ -5,7 +5,7 @@ cd /d "%~dp0" || goto :failed
 
 set "RUNTIME=tools\python\windows-x86_64\python.exe"
 if not exist "%RUNTIME%" (
-  echo 包内 Windows x64 运行时缺失。请完整解压便携版 ZIP 后重试。
+  echo Bundled Windows x64 runtime is missing. Extract the entire portable ZIP and retry.
   goto :failed
 )
 
@@ -14,6 +14,6 @@ if errorlevel 1 goto :failed
 exit /b 0
 
 :failed
-echo 启动失败。请检查上方信息，并确认当前目录可写。
+echo Startup failed. Check the message above and make sure this folder is writable.
 pause
 exit /b 1
