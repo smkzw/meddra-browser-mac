@@ -80,7 +80,9 @@ SESSION_META_HEADERS = [
 MAX_LISTING_SHEETS = 40
 MAX_ROWS_PER_SHEET = 200_000
 MAX_UNIQUE_TERMS = 20_000
-MAX_OCCURRENCES_PER_TERM = 25
+# Hard cap on retained occurrence rows across the whole import. Exceeding this
+# fails closed — never keep count>len(occurrences) and silently drop export rows.
+MAX_TOTAL_OCCURRENCES = 100_000
 CONFIRMED_EXPORT_STATUSES = frozenset({"accepted", "edited", "manual", "confirmed"})
 _CSV_FORMULA_PREFIXES = ("=", "+", "-", "@", "\t", "\r", "\n")
 
@@ -159,16 +161,70 @@ def _row_meta(row: dict[str, Any]) -> dict[str, Any]:
     return meta
 
 
-def _parse_rows_from_matrix(headers: list[str], matrix: list[list[Any]], sheet: str) -> list[dict[str, Any]]:
+def _validate_headers(headers: list[str]) -> list[str]:
+    cleaned = [_header_text(cell) for cell in headers]
+    seen: set[str] = set()
+    duplicates: list[str] = []
+    for header in cleaned:
+        if not header:
+            continue
+        if header in seen:
+            duplicates.append(header)
+        else:
+            seen.add(header)
+    if duplicates:
+        uniq = "、".join(dict.fromkeys(duplicates))
+        raise ValueError(f"存在重复表头，无法可靠定位来源列：{uniq}")
+    return cleaned
+
+
+def _parse_rows_from_matrix(
+    headers: list[str],
+    matrix: list[list[Any]],
+    sheet: str,
+    *,
+    excel_rows: list[int] | None = None,
+) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     for index, values in enumerate(matrix):
-        row: dict[str, Any] = {"_sheet": sheet, "_excel_row": index + 2}
+        excel_row = excel_rows[index] if excel_rows is not None else index + 2
+        row: dict[str, Any] = {"_sheet": sheet, "_excel_row": excel_row}
         for col_index, header in enumerate(headers):
             if not header:
                 continue
             row[header] = values[col_index] if col_index < len(values) else ""
         rows.append(row)
     return rows
+
+
+def _decode_listing_text(content: bytes) -> str:
+    last_error: Exception | None = None
+    for encoding in ("utf-8-sig", "utf-8", "gb18030"):
+        try:
+            return content.decode(encoding)
+        except UnicodeDecodeError as exc:
+            last_error = exc
+    raise ValueError(f"无法按 UTF-8/GB18030 解码 CSV：{last_error}")
+
+
+def _append_occurrence(
+    unique_map: dict[tuple[str, str], UniqueTerm],
+    *,
+    term: str,
+    coding_type: str,
+    occurrence: dict[str, Any],
+    total_occurrences: list[int],
+) -> None:
+    if total_occurrences[0] >= MAX_TOTAL_OCCURRENCES:
+        raise ValueError(
+            f"编码出现次数超过上限 {MAX_TOTAL_OCCURRENCES}，已拒绝导入以避免静默丢行；请拆分 Listing 后重试"
+        )
+    key = (term, coding_type)
+    if key not in unique_map:
+        unique_map[key] = UniqueTerm(term=term, coding_type=coding_type, count=0)
+    unique_map[key].count += 1
+    unique_map[key].occurrences.append(occurrence)
+    total_occurrences[0] += 1
 
 
 def _detect_targets(sheet: str, headers: list[str]) -> list[tuple[str, str]]:
@@ -231,11 +287,18 @@ def _append_occurrence_rows(
     match_type: str = "",
     match_score: Any = "",
     exception_reason: str = "",
+    dictionary_version: str = "",
 ) -> None:
     term = item.get("term") or ""
     coding_type = item.get("coding_type") or ""
     occurrences = list(item.get("occurrences") or [{}])
-    for occ in occurrences[:MAX_OCCURRENCES_PER_TERM]:
+    # Fail closed if upstream truncated occurrences while inflating count.
+    count = int(item.get("count") or len(occurrences) or 0)
+    if count and len(occurrences) not in {0, count} and len(occurrences) < count:
+        raise ValueError(
+            f"术语「{term}」出现次数 count={count} 与 occurrences={len(occurrences)} 不一致，拒绝部分导出"
+        )
+    for occ in occurrences:
         row = {
             "术语类型": coding_type,
             "原文术语": term,
@@ -250,6 +313,8 @@ def _append_occurrence_rows(
             "LLT英文": codes.get("llt_en", ""),
             "备注": note,
         }
+        if dictionary_version:
+            row["词典版本"] = dictionary_version
         if exception_reason:
             row["审阅异常原因"] = exception_reason
         for meta in SESSION_META_HEADERS:
@@ -277,6 +342,7 @@ def parse_data_listing_excel(content: bytes, filename: str = "") -> dict[str, An
         targets: list[CodingTarget] = []
         unique_map: dict[tuple[str, str], UniqueTerm] = {}
         total_rows = 0
+        total_occurrences = [0]
 
         sheet_seen = 0
         for sheet_name in workbook.sheetnames:
@@ -291,22 +357,25 @@ def parse_data_listing_excel(content: bytes, filename: str = "") -> dict[str, An
                 header_row = next(rows_iter)
             except StopIteration:
                 continue
-            headers = [_header_text(cell) for cell in header_row]
+            headers = _validate_headers(list(header_row))
             if not any(headers):
                 continue
 
             sheet_rows: list[list[Any]] = []
-            for values in rows_iter:
+            excel_rows: list[int] = []
+            for excel_row, values in enumerate(rows_iter, start=2):
                 if values is None:
                     continue
-                # Skip fully empty rows.
+                # Skip fully empty rows but keep the true Excel row number for
+                # non-empty rows so EDC source tracing stays accurate.
                 if all(cell is None or str(cell).strip() == "" for cell in values):
                     continue
                 sheet_rows.append(list(values))
+                excel_rows.append(excel_row)
                 if len(sheet_rows) > MAX_ROWS_PER_SHEET:
                     raise ValueError(f"工作表 {sheet_name} 行数超过上限 {MAX_ROWS_PER_SHEET}")
             total_rows += len(sheet_rows)
-            rows = _parse_rows_from_matrix(headers, sheet_rows, sheet_name)
+            rows = _parse_rows_from_matrix(headers, sheet_rows, sheet_name, excel_rows=excel_rows)
             sheet_targets = _detect_targets(sheet_name, headers)
             sheets_info.append(
                 {
@@ -327,19 +396,18 @@ def parse_data_listing_excel(content: bytes, filename: str = "") -> dict[str, An
                     if not term:
                         continue
                     non_empty += 1
-                    key = (term, coding_type)
-                    if key not in unique_map:
-                        unique_map[key] = UniqueTerm(term=term, coding_type=coding_type, count=0)
-                    unique_map[key].count += 1
-                    if len(unique_map[key].occurrences) < MAX_OCCURRENCES_PER_TERM:
-                        unique_map[key].occurrences.append(
-                            {
-                                "sheet": sheet_name,
-                                "column": column,
-                                **_row_meta(row),
-                                "excel_row": row.get("_excel_row"),
-                            }
-                        )
+                    _append_occurrence(
+                        unique_map,
+                        term=term,
+                        coding_type=coding_type,
+                        occurrence={
+                            "sheet": sheet_name,
+                            "column": column,
+                            **_row_meta(row),
+                            "excel_row": row.get("_excel_row"),
+                        },
+                        total_occurrences=total_occurrences,
+                    )
                 targets.append(
                     CodingTarget(
                         sheet=sheet_name,
@@ -373,7 +441,7 @@ def parse_data_listing_excel(content: bytes, filename: str = "") -> dict[str, An
 
 
 def parse_data_listing_csv(content: bytes, filename: str = "listing.csv") -> dict[str, Any]:
-    text = content.decode("utf-8-sig", errors="replace")
+    text = _decode_listing_text(content)
     reader = csv.reader(io.StringIO(text))
     matrix = [list(row) for row in reader]
     if not matrix:
@@ -384,13 +452,19 @@ def parse_data_listing_csv(content: bytes, filename: str = "listing.csv") -> dic
             "unique_terms": [],
             "stats": {"sheet_count": 0, "data_rows": 0, "target_count": 0, "unique_term_count": 0},
         }
-    headers = [_header_text(cell) for cell in matrix[0]]
-    body = [list(row) for row in matrix[1:] if any(str(c).strip() for c in row)]
+    headers = _validate_headers(matrix[0])
+    body: list[list[Any]] = []
+    excel_rows: list[int] = []
+    for excel_row, row in enumerate(matrix[1:], start=2):
+        if not any(str(c).strip() for c in row):
+            continue
+        body.append(list(row))
+        excel_rows.append(excel_row)
     if len(body) > MAX_ROWS_PER_SHEET:
         raise ValueError(f"CSV 行数超过上限 {MAX_ROWS_PER_SHEET}")
     # Treat CSV as a single sheet named after the file stem.
     sheet_name = Path(filename).stem[:32] or "CSV"
-    rows = _parse_rows_from_matrix(headers, body, sheet_name)
+    rows = _parse_rows_from_matrix(headers, body, sheet_name, excel_rows=excel_rows)
     targets: list[CodingTarget] = []
     unique_map: dict[tuple[str, str], UniqueTerm] = {}
     sheet_targets = _detect_targets(sheet_name, headers)
@@ -399,6 +473,7 @@ def parse_data_listing_csv(content: bytes, filename: str = "listing.csv") -> dic
     if not sheet_targets:
         sheet_targets = _detect_targets("", headers)
 
+    total_occurrences = [0]
     for column, coding_type in sheet_targets:
         non_empty = 0
         for row in rows:
@@ -409,17 +484,17 @@ def parse_data_listing_csv(content: bytes, filename: str = "listing.csv") -> dic
             if not term:
                 continue
             non_empty += 1
-            key = (term, coding_type)
-            if key not in unique_map:
-                unique_map[key] = UniqueTerm(term=term, coding_type=coding_type, count=0)
-            unique_map[key].count += 1
-            unique_map[key].occurrences.append(
-                {
+            _append_occurrence(
+                unique_map,
+                term=term,
+                coding_type=coding_type,
+                occurrence={
                     "sheet": sheet_name,
                     "column": column,
                     **_row_meta(row),
                     "excel_row": row.get("_excel_row"),
-                }
+                },
+                total_occurrences=total_occurrences,
             )
         targets.append(
             CodingTarget(
@@ -483,7 +558,12 @@ class TermSuggester:
         self._store = store
         self._terms: tuple[dict[str, Any], ...] | None = None
         self._by_level: dict[str, list[dict[str, Any]]] | None = None
+        self._pt_by_code: dict[str, dict[str, Any]] | None = None
         self._norm_index: dict[tuple[str, str], list[dict[str, Any]]] | None = None
+        self._exact_case_index: dict[tuple[str, str], list[dict[str, Any]]] | None = None
+        self._token_index: dict[tuple[str, str], list[dict[str, Any]]] | None = None
+        self._name_rows: list[tuple[dict[str, Any], str, str, str]] | None = None
+        self._prefix_buckets: dict[tuple[str, str], list[tuple[dict[str, Any], str, str]]] | None = None
 
     def _ensure_index(self) -> None:
         if self._terms is not None:
@@ -494,20 +574,43 @@ class TermSuggester:
             if term.get("level") in {"PT", "LLT"}
         )
         by_level: dict[str, list[dict[str, Any]]] = {"PT": [], "LLT": []}
+        pt_by_code: dict[str, dict[str, Any]] = {}
         norm_index: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
+        exact_case_index: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
+        token_index: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
+        name_rows: list[tuple[dict[str, Any], str, str, str]] = []
+        prefix_buckets: dict[tuple[str, str], list[tuple[dict[str, Any], str, str]]] = defaultdict(list)
         for term in terms:
             level = term.get("level") or ""
             if level in by_level:
                 by_level[level].append(term)
+            if level == "PT":
+                pt_by_code[str(term.get("code") or "")] = term
             for lang, name in (("zh", term.get("zh_name")), ("en", term.get("en_name"))):
                 if not name:
                     continue
-                key = (lang, normalize_text(str(name)))
-                if key not in norm_index or term not in norm_index[key]:
+                raw = str(name)
+                norm = normalize_text(raw)
+                key = (lang, norm)
+                if term not in norm_index[key]:
                     norm_index[key].append(term)
+                exact_key = (lang, raw)
+                if term not in exact_case_index[exact_key]:
+                    exact_case_index[exact_key].append(term)
+                tkey = token_key(raw)
+                if tkey and term not in token_index[(lang, tkey)]:
+                    token_index[(lang, tkey)].append(term)
+                name_rows.append((term, lang, norm, raw))
+                if norm:
+                    prefix_buckets[(lang, norm[0])].append((term, norm, raw))
         self._terms = terms
         self._by_level = by_level
+        self._pt_by_code = pt_by_code
         self._norm_index = dict(norm_index)
+        self._exact_case_index = dict(exact_case_index)
+        self._token_index = dict(token_index)
+        self._name_rows = name_rows
+        self._prefix_buckets = dict(prefix_buckets)
 
     def suggest_batch(
         self,
@@ -532,8 +635,10 @@ class TermSuggester:
 
     def _suggest_one(self, query: str, langs: list[str], limit_per_term: int) -> dict[str, Any]:
         assert self._norm_index is not None
-        assert self._by_level is not None
-        assert self._terms is not None
+        assert self._exact_case_index is not None
+        assert self._token_index is not None
+        assert self._name_rows is not None
+        assert self._pt_by_code is not None
 
         norm_query = normalize_text(query)
         exact_hits: list[dict[str, Any]] = []
@@ -547,35 +652,40 @@ class TermSuggester:
             if key in seen:
                 return
             seen.add(key)
-            exact_hits.append(_suggestion_payload(term, match_type, score, reason))
+            payload = _suggestion_payload(term, match_type, score, reason)
+            if payload.get("level") == "LLT" and payload.get("parent_code"):
+                parent = self._pt_by_code.get(str(payload["parent_code"]))
+                if parent is not None:
+                    payload["pt"] = _suggestion_payload(parent, "parent", 100, "LLT 对应 PT")
+            exact_hits.append(payload)
 
+        # Preserve distinct codes that only differ by English casing (e.g. Rh vs rh).
         for lang in langs:
-            for term in self._norm_index.get((lang, norm_query), []):
-                # Prefer current LLT for coding; PT is the regulatory aggregation level.
+            for term in self._exact_case_index.get((lang, query), []):
                 if term.get("level") == "LLT" and term.get("is_current") != "Y":
-                    score = 96
-                    reason = "LLT 完全匹配（非当前术语，建议复核）"
+                    score, reason = 96, "LLT 完全匹配（大小写精确；非当前术语，建议复核）"
                 elif term.get("level") == "LLT":
-                    score = 100
-                    reason = "LLT 完全匹配"
+                    score, reason = 100, "LLT 完全匹配（大小写精确）"
                 else:
-                    score = 99
-                    reason = "PT 完全匹配"
+                    score, reason = 99, "PT 完全匹配（大小写精确）"
+                push(term, "exact", score, reason)
+            for term in self._norm_index.get((lang, norm_query), []):
+                if term.get("level") == "LLT" and term.get("is_current") != "Y":
+                    score, reason = 96, "LLT 完全匹配（非当前术语，建议复核）"
+                elif term.get("level") == "LLT":
+                    score, reason = 100, "LLT 完全匹配"
+                else:
+                    score, reason = 99, "PT 完全匹配"
                 push(term, "exact", score, reason)
 
         if not exact_hits:
-            # Lexical token-set match (word-order variants).
             query_key = token_key(query)
             if query_key:
-                for term in self._terms:
-                    for lang in langs:
-                        name = term.get("zh_name") if lang == "zh" else term.get("en_name")
-                        if name and token_key(str(name)) == query_key:
-                            push(term, "lexical", 94, "词元集合一致（词序变体）")
-                            break
+                for lang in langs:
+                    for term in self._token_index.get((lang, query_key), []):
+                        push(term, "lexical", 94, "词元集合一致（词序变体）")
 
         if not exact_hits:
-            # Clinical colloquial Chinese → MedDRA preferred wording (e.g. 过敏性→变应性).
             for rewritten, reason in clinical_zh_expansions(query):
                 rewritten_norm = normalize_text(rewritten)
                 if not rewritten_norm or rewritten_norm == norm_query:
@@ -584,78 +694,84 @@ class TermSuggester:
                     for term in self._norm_index.get((lang, rewritten_norm), []):
                         push(term, "alias", 92, reason)
 
+        assert self._prefix_buckets is not None
+        assert self._name_rows is not None
+
         if not exact_hits and len(norm_query) >= 2:
-            # Containment match: verbatim is inside a MedDRA term or vice versa.
+            # Cheap full-table containment (string `in`) preserves mid-string hits.
+            # Length gates avoid comparing clearly incompatible names.
+            qlen = len(norm_query)
             contains_hits: list[tuple[float, dict[str, Any], str, str]] = []
-            for term in self._terms:
-                for lang in langs:
-                    name = term.get("zh_name") if lang == "zh" else term.get("en_name")
-                    if not name:
-                        continue
-                    norm_name = normalize_text(str(name))
-                    if not norm_name or norm_name == norm_query:
-                        continue
-                    if norm_query in norm_name:
-                        # Prefer shorter MedDRA terms (more specific match).
-                        score = 84 - min(20, abs(len(norm_name) - len(norm_query)) * 0.3)
-                        contains_hits.append((score, term, "contains", "术语文本包含原文"))
-                    elif norm_name in norm_query and len(norm_name) >= 2:
-                        score = 80 - min(15, abs(len(norm_name) - len(norm_query)) * 0.3)
-                        contains_hits.append((score, term, "contains", "原文包含术语文本"))
+            for term, lang, norm_name, _raw in self._name_rows:
+                if lang not in langs or not norm_name or norm_name == norm_query:
+                    continue
+                nlen = len(norm_name)
+                if nlen >= qlen and (nlen - qlen) <= max(24, qlen) and norm_query in norm_name:
+                    score = 84 - min(20, (nlen - qlen) * 0.3)
+                    contains_hits.append((score, term, "contains", "术语文本包含原文"))
+                elif 2 <= nlen <= qlen and (qlen - nlen) <= max(24, qlen) and norm_name in norm_query:
+                    score = 80 - min(15, (qlen - nlen) * 0.3)
+                    contains_hits.append((score, term, "contains", "原文包含术语文本"))
             contains_hits.sort(
                 key=lambda item: (
                     -item[0],
                     0 if item[1].get("level") == "LLT" else 1,
-                    abs(len(normalize_text(str(item[1].get("zh_name") or item[1].get("en_name") or ""))) - len(norm_query)),
+                    abs(len(str(item[1].get("en_name") or item[1].get("zh_name") or "")) - len(norm_query)),
                 )
             )
             for score, term, match_type, reason in contains_hits[:limit_per_term]:
                 push(term, match_type, score, reason)
 
         if not exact_hits and len(norm_query) >= 3:
+            # Fuzzy is expensive; restrict to same first-character buckets.
+            fuzzy_rows: list[tuple[dict[str, Any], str, str]] = []
+            for lang in langs:
+                fuzzy_rows.extend(self._prefix_buckets.get((lang, norm_query[0]), []))
             fuzzy_hits: list[tuple[float, dict[str, Any], str, str]] = []
             threshold = fuzzy_threshold(norm_query)
-            for term in self._terms:
-                for lang in langs:
-                    name = term.get("zh_name") if lang == "zh" else term.get("en_name")
-                    if not name:
-                        continue
-                    norm_name = normalize_text(str(name))
-                    if not fuzzy_candidate(norm_query, norm_name):
-                        continue
-                    score = fuzzy_score(norm_query, norm_name)
-                    if score >= threshold:
-                        fuzzy_hits.append((score, term, "fuzzy", "拼写或近似文本候选"))
+            for term, norm_name, _raw in fuzzy_rows:
+                if not norm_name:
+                    continue
+                if abs(len(norm_name) - len(norm_query)) > max(4, len(norm_query) // 2 + 2):
+                    continue
+                if not fuzzy_candidate(norm_query, norm_name):
+                    continue
+                score = fuzzy_score(norm_query, norm_name)
+                if score >= threshold:
+                    fuzzy_hits.append((score, term, "fuzzy", "拼写或近似文本候选"))
             fuzzy_hits.sort(key=lambda item: (-item[0], 0 if item[1].get("level") == "LLT" else 1))
             for score, term, match_type, reason in fuzzy_hits[:limit_per_term]:
                 push(term, match_type, score, reason)
 
-        # Prefer LLT > PT for coding suggestions at equal score.
         exact_hits.sort(
             key=lambda item: (
                 -float(item.get("score") or 0),
                 0 if item.get("level") == "LLT" else 1,
+                0 if item.get("match_type") == "exact" and "大小写精确" in str(item.get("reason") or "") else 1,
                 str(item.get("code") or ""),
             )
         )
         best = exact_hits[0] if exact_hits else None
         pt_payload: dict[str, Any] | None = None
         if best and best.get("level") == "LLT" and best.get("parent_code"):
-            pt_term = self._find_term("PT", str(best["parent_code"]))
+            pt_term = self._pt_by_code.get(str(best["parent_code"]))
             if pt_term is not None:
                 pt_payload = _suggestion_payload(pt_term, "parent", 100, "LLT 对应 PT")
         elif best and best.get("level") == "PT":
             pt_payload = best
 
+        candidates = exact_hits[:limit_per_term]
         return {
             "query": query,
             "best": best,
             "pt": pt_payload,
-            "candidates": exact_hits[:limit_per_term],
+            "candidates": candidates,
             "status": "suggested" if best else "no_match",
         }
 
     def _find_term(self, level: str, code: str) -> dict[str, Any] | None:
+        if level == "PT" and self._pt_by_code is not None:
+            return self._pt_by_code.get(str(code))
         assert self._by_level is not None
         for term in self._by_level.get(level, []):
             if str(term.get("code")) == str(code):
@@ -666,6 +782,8 @@ class TermSuggester:
 def build_export_bundle(
     unique_terms: list[dict[str, Any]],
     decisions: dict[str, dict[str, Any]],
+    *,
+    dictionary_version: str = "",
 ) -> dict[str, Any]:
     """Split confirmed coded rows from review exceptions.
 
@@ -690,6 +808,7 @@ def build_export_bundle(
                 codes=codes,
                 match_type=str(decision.get("match_type") or ""),
                 match_score=decision.get("score") or "",
+                dictionary_version=dictionary_version,
             )
             continue
         if status in CONFIRMED_EXPORT_STATUSES:
@@ -708,6 +827,7 @@ def build_export_bundle(
             note=note,
             codes={"pt_code": "", "pt_zh": "", "pt_en": "", "llt_code": "", "llt_zh": "", "llt_en": ""},
             exception_reason=reason,
+            dictionary_version=dictionary_version,
         )
     return {
         "coded_rows": coded_rows,
@@ -725,10 +845,11 @@ def build_export_bundle(
 def build_export_rows(
     unique_terms: list[dict[str, Any]],
     decisions: dict[str, dict[str, Any]],
+    *,
+    dictionary_version: str = "",
 ) -> list[dict[str, Any]]:
     """Backward-compatible helper: formal coded rows only."""
-    return build_export_bundle(unique_terms, decisions)["coded_rows"]
-
+    return build_export_bundle(unique_terms, decisions, dictionary_version=dictionary_version)["coded_rows"]
 
 def code_to_csv(rows: list[dict[str, Any]]) -> str:
     if not rows:
@@ -738,6 +859,7 @@ def code_to_csv(rows: list[dict[str, Any]]) -> str:
         "术语类型",
         "原文术语",
         "编码状态",
+        "词典版本",
         "PT代码",
         "PT中文",
         "PT英文",
@@ -747,6 +869,7 @@ def code_to_csv(rows: list[dict[str, Any]]) -> str:
         "匹配方式",
         "匹配分",
         "备注",
+        "审阅异常原因",
     ]
     extra_keys: list[str] = []
     for row in rows:
@@ -769,3 +892,14 @@ def safe_download_filename(name: str, default: str = "meddra_coded_listing.csv")
     if not cleaned.lower().endswith(".csv"):
         cleaned = f"{cleaned}.csv"
     return cleaned[:120]
+
+
+def content_disposition_attachment(name: str, default: str = "meddra_export.csv") -> str:
+    """RFC 5987 Content-Disposition that never puts non-ASCII into filename=."""
+    from urllib.parse import quote
+
+    cleaned = safe_download_filename(name, default)
+    ascii_fallback = re.sub(r"[^A-Za-z0-9._-]+", "_", cleaned).strip("._") or default
+    if not ascii_fallback.lower().endswith(".csv"):
+        ascii_fallback = f"{ascii_fallback}.csv"
+    return f"attachment; filename=\"{ascii_fallback}\"; filename*=UTF-8''{quote(cleaned)}"

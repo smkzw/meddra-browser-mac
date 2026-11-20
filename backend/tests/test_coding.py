@@ -12,6 +12,7 @@ from app.coding import (
     build_export_bundle,
     build_export_rows,
     code_to_csv,
+    content_disposition_attachment,
     csv_safe_cell,
     parse_data_listing_csv,
     parse_data_listing_excel,
@@ -130,6 +131,39 @@ class CodingListingTests(unittest.TestCase):
         text = code_to_csv([{"原文术语": "=1+2", "编码状态": "accepted", "PT代码": "+1234"}])
         self.assertIn("'=1+2", text)
         self.assertIn("'+1234", text)
+
+    def test_content_disposition_keeps_ascii_filename_and_utf8_star(self) -> None:
+        header = content_disposition_attachment("meddra_coded_粘贴列表-1词.csv")
+        self.assertIn('filename="meddra_coded_', header)
+        self.assertNotIn("粘贴", header.split("filename*=", 1)[0])
+        self.assertIn("filename*=UTF-8''", header)
+        self.assertIn("%", header)
+
+    def test_excel_empty_rows_preserve_source_line_numbers(self) -> None:
+        wb = Workbook()
+        ws = wb.active
+        assert ws is not None
+        ws.title = "AE"
+        ws.append(["项目编号", "不良事件名称(AETERM)"])
+        ws.append(["P1", "头痛"])
+        ws.append([None, None])
+        ws.append(["P1", "皮疹"])
+        buffer = io.BytesIO()
+        wb.save(buffer)
+        parsed = parse_data_listing_excel(buffer.getvalue(), "ae.xlsx")
+        rows = {item["term"]: item["occurrences"][0]["excel_row"] for item in parsed["unique_terms"]}
+        self.assertEqual(rows["头痛"], 2)
+        self.assertEqual(rows["皮疹"], 4)
+
+    def test_gb18030_csv_imports_without_mojibake(self) -> None:
+        content = "不良事件名称(AETERM)\n头痛\n".encode("gb18030")
+        parsed = parse_data_listing_csv(content, "ae.csv")
+        self.assertEqual(parsed["unique_terms"][0]["term"], "头痛")
+
+    def test_duplicate_headers_are_rejected(self) -> None:
+        content = "不良事件名称(AETERM),不良事件名称(AETERM)\n头痛,头晕\n".encode("utf-8")
+        with self.assertRaisesRegex(ValueError, "重复表头"):
+            parse_data_listing_csv(content, "ae.csv")
 
     def test_import_payload_shape(self) -> None:
         # Ensure the shape used by the HTTP layer is stable.

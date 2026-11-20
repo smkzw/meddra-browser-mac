@@ -65,18 +65,22 @@ class MeddraDataTests(unittest.TestCase):
 
     def test_free_mac_app_support_dictionary_is_fallback_after_stale_source(self) -> None:
         with TemporaryDirectory() as tmp:
+            state = Path(tmp) / "data"
             support_root = Path(tmp) / "dictionaries"
             support_root.mkdir()
+            state.mkdir()
             with patch.dict(
                 os.environ,
                 {
-                    "MEDDRA_BROWSER_STATE_DIR": str(Path(tmp) / "state"),
+                    "MEDDRA_BROWSER_STATE_DIR": str(state),
                     "MEDDRA_SOURCE_ROOT": "",
                     "MEDDRA_DISTRIBUTION_MODE": "free_mac",
                 },
                 clear=False,
-            ), patch("app.meddra_data.mac_app_support_dictionary_root", return_value=support_root):
-                self.assertIn(support_root, explicit_source_roots())
+            ), patch("app.meddra_data.sys.platform", "darwin"):
+                roots = explicit_source_roots()
+                self.assertIn(support_root, roots)
+                self.assertTrue(all("Library/Application Support" not in str(path) for path in roots))
 
     def test_release_discovery_allows_single_language_release(self) -> None:
         with TemporaryDirectory() as tmp:

@@ -23,9 +23,9 @@ from .coding import (
     TermSuggester,
     build_export_bundle,
     code_to_csv,
+    content_disposition_attachment,
     parse_data_listing_csv,
     parse_data_listing_excel,
-    safe_download_filename,
 )
 from .meddra_data import (
     ALL_SEARCH_LEVELS,
@@ -39,8 +39,14 @@ from .meddra_data import (
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-FRONTEND_DIST = PROJECT_ROOT / "frontend" / "dist"
+FRONTEND_DIST = (PROJECT_ROOT / "frontend" / "dist").resolve()
 ALLOWED_LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1", "[::1]", "testserver"})
+SECURITY_HEADERS = {
+    "X-Content-Type-Options": "nosniff",
+    "Content-Security-Policy": "frame-ancestors 'none'",
+    "Referrer-Policy": "no-referrer",
+    "Cache-Control": "no-store",
+}
 
 app = FastAPI(title="MedDRA Browser", version="0.2.0")
 if (FRONTEND_DIST / "assets").exists():
@@ -59,68 +65,107 @@ def _host_allowed(host_header: str) -> bool:
     return hostname in ALLOWED_LOOPBACK_HOSTS or hostname.endswith(".localhost")
 
 
-def _origin_hostname(origin: str) -> str | None:
+def _origin_parts(origin: str) -> tuple[str, str, int | None] | None:
     if not origin or origin == "null":
         return None
     try:
         parsed = urlparse(origin)
     except ValueError:
         return None
-    if parsed.scheme not in {"http", "https"}:
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
         return None
-    return (parsed.hostname or "").lower() or None
+    return parsed.scheme, parsed.hostname.lower(), parsed.port
 
 
 def _is_runtime_info_path(path: str) -> bool:
     return path.rstrip("/") == "/api/runtime-info"
 
 
+def _same_authority(request: Request, origin: str) -> bool:
+    parts = _origin_parts(origin)
+    if parts is None:
+        return False
+    scheme, hostname, port = parts
+    host_header = request.headers.get("host") or ""
+    req_host = _request_hostname(host_header)
+    if hostname != req_host:
+        return False
+    # Compare ports when the Origin explicitly carries one; otherwise accept the
+    # Host header's default/current port for packaged same-origin UI.
+    if port is None:
+        return True
+    if host_header.startswith("[") and "]:" in host_header:
+        try:
+            host_port = int(host_header.rsplit("]:", 1)[1])
+        except ValueError:
+            return False
+        return port == host_port
+    if ":" in host_header and not host_header.startswith("["):
+        try:
+            host_port = int(host_header.rsplit(":", 1)[1])
+        except ValueError:
+            return False
+        return port == host_port
+    default_port = 443 if scheme == "https" else 80
+    return port == default_port
+
+
 def _origin_permitted(request: Request) -> bool:
     origin = request.headers.get("origin")
-    if origin is None:
-        return True
+    site = (request.headers.get("sec-fetch-site") or "").lower()
     if origin == "null":
         # file:// portable discovery may probe runtime-info only.
         return _is_runtime_info_path(request.url.path) and request.method in {"GET", "HEAD", "OPTIONS"}
-    hostname = _origin_hostname(origin)
-    if hostname is None:
+    if origin is None:
+        # Non-browser clients / same-origin navigations. Still reject explicit
+        # cross-site fetches that omit Origin but advertise Sec-Fetch-Site.
+        if site in {"cross-site", "same-site"} and request.url.path.startswith("/api/"):
+            return _is_runtime_info_path(request.url.path) and request.method in {"GET", "HEAD", "OPTIONS"}
+        return True
+    if site in {"cross-site", "same-site"} and not _is_runtime_info_path(request.url.path):
         return False
-    # Same-origin local UI, Vite proxy, or another loopback front-end.
-    return hostname in ALLOWED_LOOPBACK_HOSTS or hostname.endswith(".localhost")
+    return _same_authority(request, origin)
 
 
 def _runtime_info_cors_headers(request: Request) -> dict[str, str]:
-    origin = request.headers.get("origin") or "null"
     headers = {
-        "Access-Control-Allow-Origin": "null" if origin == "null" else origin,
+        "Access-Control-Allow-Origin": "null",
         "Access-Control-Allow-Methods": "GET, OPTIONS",
         "Access-Control-Allow-Headers": request.headers.get("access-control-request-headers") or "Content-Type",
         "Access-Control-Allow-Private-Network": "true",
         "Cache-Control": "no-store",
         "Vary": "Origin",
     }
-    # Never allow credentials on the restricted discovery surface.
     return headers
+
+
+def _with_security_headers(response: Response) -> Response:
+    for key, value in SECURITY_HEADERS.items():
+        response.headers.setdefault(key, value)
+    return response
 
 
 @app.middleware("http")
 async def local_access_guard(request: Request, call_next):  # type: ignore[no-untyped-def]
     if not _host_allowed(request.headers.get("host", "")):
-        return JSONResponse(status_code=403, content={"error": "host_not_allowed", "detail": "仅允许本机回环访问"})
+        return _with_security_headers(
+            JSONResponse(status_code=403, content={"error": "host_not_allowed", "detail": "仅允许本机回环访问"})
+        )
     if request.url.path.startswith("/api/") and not _origin_permitted(request):
-        return JSONResponse(status_code=403, content={"error": "origin_not_allowed", "detail": "禁止跨站访问本地 API"})
+        return _with_security_headers(
+            JSONResponse(status_code=403, content={"error": "origin_not_allowed", "detail": "禁止跨站访问本地 API"})
+        )
 
-    if request.method == "OPTIONS" and _is_runtime_info_path(request.url.path):
-        origin = request.headers.get("origin")
-        if origin == "null" or request.headers.get("access-control-request-private-network", "").lower() == "true":
-            return Response(status_code=204, headers=_runtime_info_cors_headers(request))
-        return Response(status_code=403)
+    if request.method == "OPTIONS":
+        if _is_runtime_info_path(request.url.path) and request.headers.get("origin") == "null":
+            return _with_security_headers(Response(status_code=204, headers=_runtime_info_cors_headers(request)))
+        return _with_security_headers(Response(status_code=403))
 
     response = await call_next(request)
-    if _is_runtime_info_path(request.url.path) and (request.headers.get("origin") == "null" or request.method == "OPTIONS"):
+    if _is_runtime_info_path(request.url.path) and request.headers.get("origin") == "null":
         for key, value in _runtime_info_cors_headers(request).items():
             response.headers[key] = value
-    return response
+    return _with_security_headers(response)
 
 
 INDEX_LOCK = threading.Lock()
@@ -155,7 +200,7 @@ class SearchRequest(BaseModel):
     include_synonyms: bool = True
     ignore_diacritics: bool = True
     include_non_current: bool = True
-    limit_per_group: int = 60
+    limit_per_group: int = Field(default=60, ge=1, le=500)
 
 
 class AdvancedCondition(BaseModel):
@@ -327,6 +372,7 @@ def index_status_for_config(config: Any, *, start: bool = False, force: bool = F
                 )
             return
         store.cache_clear()
+        term_suggester.cache_clear()
         with INDEX_LOCK:
             done = INDEX_JOBS.setdefault(key, {})
             total_rows = int(done.get("total_rows") or done.get("processed_rows") or 0)
@@ -392,14 +438,23 @@ def pick_dictionary_directory() -> Path | None:
         raise RuntimeError("当前系统不支持本地文件夹选择器，请使用手动路径导入")
 
     try:
-        result = subprocess.run(command, capture_output=True, text=True, timeout=300, check=False)
+        result = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="strict",
+            timeout=300,
+            check=False,
+        )
     except (OSError, subprocess.SubprocessError) as exc:
         raise RuntimeError("无法打开本地文件夹选择器") from exc
 
-    selected = result.stdout.strip()
+    selected = (result.stdout or "").strip()
     if selected:
         return Path(selected).expanduser()
-    if result.returncode == 0 or "cancel" in result.stderr.lower():
+    stderr = (result.stderr or "").lower()
+    if result.returncode == 0 or "cancel" in stderr or "用户已取消" in (result.stderr or ""):
         return None
     raise RuntimeError("本地文件夹选择器已关闭或不可用")
 
@@ -416,6 +471,11 @@ def startup() -> None:
 @lru_cache(maxsize=8)
 def store(version: Optional[str] = None) -> MeddraStore:
     return MeddraStore(default_source_config(version))
+
+
+@lru_cache(maxsize=8)
+def term_suggester(version: Optional[str] = None) -> TermSuggester:
+    return TermSuggester(store(version))
 
 
 @app.get("/api/status")
@@ -498,6 +558,7 @@ def api_add_source_root(payload: SourceRootRequest) -> dict[str, Any]:
     except RuntimeError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     store.cache_clear()
+    term_suggester.cache_clear()
     releases = discover_releases()
     return {
         "status": "added",
@@ -520,6 +581,7 @@ def api_pick_source_root() -> dict[str, Any]:
     except RuntimeError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     store.cache_clear()
+    term_suggester.cache_clear()
     releases = discover_releases()
     return {
         "status": "added",
@@ -611,8 +673,8 @@ def api_smq_analysis(level: str, code: str, version: Optional[str] = Query(defau
 
 @app.post("/api/export/csv")
 def api_export_csv(payload: ExportRequest) -> Response:
-    csv_text = store().export_csv(payload.rows)
-    filename = safe_download_filename(payload.filename, "meddra_export.csv")
+    # Pure CSV formatting — does not require a bound MedDRA index.
+    csv_text = code_to_csv(payload.rows)
     if csv_text and not csv_text.startswith("\ufeff"):
         # Excel on Chinese Windows defaults to the GBK codepage and garbles UTF-8
         # Chinese terms unless the file starts with a UTF-8 BOM.
@@ -620,7 +682,7 @@ def api_export_csv(payload: ExportRequest) -> Response:
     return Response(
         content=csv_text,
         media_type="text/csv; charset=utf-8",
-        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        headers={"Content-Disposition": content_disposition_attachment(payload.filename, "meddra_export.csv")},
     )
 
 
@@ -628,6 +690,9 @@ def api_export_csv(payload: ExportRequest) -> Response:
 def api_coding_import(payload: CodingImportRequest) -> dict[str, Any]:
     if not payload.content_base64:
         raise HTTPException(status_code=400, detail="未收到文件内容")
+    # Reject oversized base64 before decoding to avoid multi-hundred-MB spikes.
+    if len(payload.content_base64) > 110 * 1024 * 1024:
+        raise HTTPException(status_code=413, detail="文件过大，请控制在 80MB 以内")
     try:
         content = base64.b64decode(payload.content_base64, validate=True)
     except Exception as exc:  # noqa: BLE001
@@ -663,7 +728,9 @@ def api_coding_suggest(payload: CodingSuggestRequest) -> dict[str, Any]:
         )
     try:
         active_store = require_ready_store(payload.version)
-        suggester = TermSuggester(active_store)
+        # Warm/reuse the per-version suggester so repeated batches do not
+        # re-normalize the entire PT/LLT table.
+        suggester = term_suggester(active_store.config.version)
         suggestions = suggester.suggest_batch(
             payload.terms,
             mode=payload.mode,
@@ -692,11 +759,20 @@ def api_coding_export(payload: CodingExportRequest) -> Response:
     export_mode = (payload.export_mode or "coded").strip().lower()
     if export_mode not in {"coded", "exceptions", "both"}:
         raise HTTPException(status_code=400, detail="export_mode 仅支持 coded / exceptions / both")
+    dictionary_version = ""
     if payload.dictionary_version:
         # Bind the export request to a ready index version so stale UI sessions
         # cannot silently ship codes against a different dictionary.
-        require_ready_store(payload.dictionary_version)
-    bundle = build_export_bundle(payload.unique_terms, payload.decisions)
+        ready = require_ready_store(payload.dictionary_version)
+        dictionary_version = ready.config.version
+    try:
+        bundle = build_export_bundle(
+            payload.unique_terms,
+            payload.decisions,
+            dictionary_version=dictionary_version,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     if export_mode == "coded":
         rows = bundle["coded_rows"]
         default_name = "meddra_coded_listing.csv"
@@ -718,14 +794,13 @@ def api_coding_export(payload: CodingExportRequest) -> Response:
         if not rows:
             raise HTTPException(status_code=409, detail={"error": "empty_export", "stats": bundle["stats"]})
     csv_text = code_to_csv(rows)
-    filename = safe_download_filename(payload.filename, default_name)
     if csv_text and not csv_text.startswith("\ufeff"):
         csv_text = f"\ufeff{csv_text}"
     return Response(
         content=csv_text,
         media_type="text/csv; charset=utf-8",
         headers={
-            "Content-Disposition": f'attachment; filename="{filename}"',
+            "Content-Disposition": content_disposition_attachment(payload.filename, default_name),
             "X-MedDRA-Export-Mode": export_mode,
             "X-MedDRA-Coded-Rows": str(bundle["stats"]["coded_row_count"]),
             "X-MedDRA-Exception-Rows": str(bundle["stats"]["exception_row_count"]),

@@ -96,6 +96,28 @@ class ApiManualCoverageTests(unittest.TestCase):
         self.assertEqual(blocked.status_code, 403)
         host_blocked = self.client.get("/api/runtime-info", headers={"Host": "evil.example"})
         self.assertEqual(host_blocked.status_code, 403)
+        options = self.client.options(
+            "/api/source-roots",
+            headers={
+                "Origin": "https://evil.example",
+                "Access-Control-Request-Method": "POST",
+                "Access-Control-Request-Private-Network": "true",
+            },
+        )
+        self.assertEqual(options.status_code, 403)
+        self.assertNotEqual(options.headers.get("access-control-allow-origin"), "https://evil.example")
+
+    def test_export_csv_supports_non_ascii_filename_without_store(self) -> None:
+        export = self.client.post(
+            "/api/export/csv",
+            json={"filename": "meddra_coded_粘贴列表-1词.csv", "rows": [{"code": "10039020", "name": "横纹肌溶解"}]},
+        )
+        self.assertEqual(export.status_code, 200)
+        disposition = export.headers.get("content-disposition", "")
+        self.assertIn("filename=", disposition)
+        self.assertIn("filename*=UTF-8''", disposition)
+        self.assertNotIn("粘贴", disposition.split("filename*=", 1)[0])
+        self.assertTrue(export.content.startswith(b"\xef\xbb\xbf"))
 
     def test_search_categories_code_and_soc_filter(self) -> None:
         exact = self.client.post(

@@ -17,7 +17,7 @@ from difflib import SequenceMatcher
 from functools import lru_cache
 from hashlib import sha1
 from pathlib import Path
-from typing import Any, Callable, Iterator
+from typing import Any, Callable, Iterable, Iterator
 
 if os.name == "nt":
     import msvcrt
@@ -253,13 +253,13 @@ def default_med_root() -> Path:
 
 
 def mac_app_support_dictionary_root() -> Path | None:
-    # The free macOS app owns this directory and can read it after Finder
-    # launch even when a previously selected Documents path is no longer
-    # available to the process. Portable and Windows runs must stay isolated
-    # from the host's app-support data.
+    # Derive dictionaries from the active state directory so an isolated QA
+    # MEDDRA_BROWSER_STATE_DIR cannot accidentally read the host Library copy.
+    # Native launchers that still want the legacy Library location should inject
+    # MEDDRA_BROWSER_STATE_DIR=~/Library/Application Support/MedDRA Browser Mac/data.
     if sys.platform != "darwin" or os.environ.get("MEDDRA_DISTRIBUTION_MODE") != "free_mac":
         return None
-    return Path.home() / "Library" / "Application Support" / "MedDRA Browser Mac" / "dictionaries"
+    return project_data_dir().parent / "dictionaries"
 
 
 def explicit_source_roots() -> list[Path]:
@@ -409,11 +409,12 @@ def add_source_root(path: str) -> Path:
     roots = load_source_roots()
     if candidate not in roots:
         roots.append(candidate)
-    source_roots_file().parent.mkdir(parents=True, exist_ok=True)
-    source_roots_file().write_text(
-        json.dumps([{"path": str(item)} for item in roots], ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
+    target = source_roots_file()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    payload = json.dumps([{"path": str(item)} for item in roots], ensure_ascii=False, indent=2)
+    temp_path = target.with_name(f".{target.name}.{os.getpid()}.tmp")
+    temp_path.write_text(payload, encoding="utf-8")
+    os.replace(temp_path, target)
     return candidate
 
 
@@ -454,7 +455,10 @@ def discover_releases(root: Path | None = None) -> list[ReleaseInfo]:
         if not med_root.exists():
             continue
         for base in iter_dictionary_dirs(med_root):
-            if "meddra-browser-mac" in base.parts:
+            # Only skip this repository's own packaging worktrees, not arbitrary
+            # user folders that happen to contain the product name.
+            parts_lower = {part.lower() for part in base.parts}
+            if {"qa-worktrees", "node_modules", "wheelhouse"} & parts_lower:
                 continue
             names = {path.name for path in base.glob("*.asc")}
             if not REQUIRED_ASC_FILES.issubset(names):
@@ -709,8 +713,20 @@ class MeddraIndexer:
                     con.close()
                 # Keep the last valid index until the new scratch database is complete.
                 # os.replace is atomic on the same volume; on Windows a live reader can
-                # make it fail, in which case the old index is still intact.
-                os.replace(temp_path, self.config.db_path)
+                # make it fail briefly, so retry before abandoning the completed temp DB.
+                last_error: Exception | None = None
+                for attempt in range(8):
+                    try:
+                        os.replace(temp_path, self.config.db_path)
+                        last_error = None
+                        break
+                    except PermissionError as exc:
+                        last_error = exc
+                        time.sleep(0.05 * (attempt + 1))
+                if last_error is not None:
+                    raise RuntimeError(
+                        "无法替换本地索引文件（可能仍被占用）；请关闭其他 MedDRA Browser 实例后重试"
+                    ) from last_error
                 self._report_progress("ready", "索引完成", percent=100)
             finally:
                 self._delete_index(temp_path)
