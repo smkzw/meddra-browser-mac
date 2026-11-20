@@ -1461,6 +1461,7 @@ class MeddraStore:
                 "available_languages": identity["available_languages"],
                 "source_signature": identity["source_signature"],
                 "index_signature_version": identity["index_signature_version"],
+                "index_identity": identity,
                 "search_levels": ALL_SEARCH_LEVELS,
                 "available_versions": [row.as_dict() for row in self.config.available_versions],
                 "counts": [dict(row) for row in counts],

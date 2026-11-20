@@ -103,18 +103,20 @@ def _same_authority(request: Request, origin: str) -> bool:
 def _origin_permitted(request: Request) -> bool:
     origin = request.headers.get("origin")
     site = (request.headers.get("sec-fetch-site") or "").lower()
+    runtime_probe = _is_runtime_info_path(request.url.path) and request.method in {"GET", "HEAD", "OPTIONS"}
+    referer = request.headers.get("referer")
+    if referer:
+        if referer == "null" or referer.startswith("file:"):
+            if not runtime_probe:
+                return False
+        elif not _same_authority(request, referer):
+            return False
     if origin == "null":
         # file:// portable discovery may probe runtime-info only.
-        return _is_runtime_info_path(request.url.path) and request.method in {"GET", "HEAD", "OPTIONS"}
-    if origin is None:
-        # Non-browser clients / same-origin navigations. Still reject explicit
-        # cross-site fetches that omit Origin but advertise Sec-Fetch-Site.
-        if site in {"cross-site", "same-site"} and request.url.path.startswith("/api/"):
-            return _is_runtime_info_path(request.url.path) and request.method in {"GET", "HEAD", "OPTIONS"}
-        return True
-    if site in {"cross-site", "same-site"} and not _is_runtime_info_path(request.url.path):
+        return runtime_probe
+    if site in {"cross-site", "same-site"} and not runtime_probe:
         return False
-    return _same_authority(request, origin)
+    return origin is None or _same_authority(request, origin)
 
 
 def _runtime_info_cors_headers(request: Request) -> dict[str, str]:

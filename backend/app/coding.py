@@ -7,6 +7,7 @@ from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Iterable
+from zipfile import BadZipFile, ZipFile
 
 from .meddra_data import (
     LEVEL_LABELS,
@@ -78,6 +79,7 @@ SESSION_META_HEADERS = [
 ]
 
 MAX_LISTING_SHEETS = 40
+MAX_WORKBOOK_EXPANDED_BYTES = 512 * 1024 * 1024
 MAX_ROWS_PER_SHEET = 200_000
 MAX_UNIQUE_TERMS = 20_000
 # Hard cap on retained occurrence rows across the whole import. Exceeding this
@@ -360,11 +362,19 @@ def _append_occurrence_rows(
 def parse_data_listing_excel(content: bytes, filename: str = "") -> dict[str, Any]:
     """Parse a multi-sheet data listing workbook (or CSV) into coding targets + unique terms."""
     from openpyxl import load_workbook
+    from openpyxl.utils.exceptions import InvalidFileException
 
     if filename.lower().endswith(".csv") or (b"\x00" not in content[:200] and b"," in content[:200] and b"PK" not in content[:4]):
         return parse_data_listing_csv(content, filename or "listing.csv")
 
-    workbook = load_workbook(io.BytesIO(content), read_only=True, data_only=True)
+    content_stream = io.BytesIO(content)
+    try:
+        with ZipFile(content_stream) as archive:
+            if sum(member.file_size for member in archive.infolist()) > MAX_WORKBOOK_EXPANDED_BYTES:
+                raise ValueError("工作簿解包后超过 512 MB，请拆分后导入")
+        workbook = load_workbook(content_stream, read_only=True, data_only=True)
+    except (BadZipFile, InvalidFileException, KeyError) as exc:
+        raise ValueError("不是有效的 Excel 工作簿，请检查文件格式或重新导出") from exc
     try:
         sheets_info: list[dict[str, Any]] = []
         targets: list[CodingTarget] = []
@@ -462,6 +472,7 @@ def parse_data_listing_excel(content: bytes, filename: str = "") -> dict[str, An
                 "data_rows": total_rows,
                 "target_count": len(targets),
                 "unique_term_count": len(unique_terms),
+                "occurrence_count": total_occurrences[0],
             },
         }
     finally:
@@ -478,7 +489,13 @@ def parse_data_listing_csv(content: bytes, filename: str = "listing.csv") -> dic
             "sheets": [],
             "coding_targets": [],
             "unique_terms": [],
-            "stats": {"sheet_count": 0, "data_rows": 0, "target_count": 0, "unique_term_count": 0},
+            "stats": {
+                "sheet_count": 0,
+                "data_rows": 0,
+                "target_count": 0,
+                "unique_term_count": 0,
+                "occurrence_count": 0,
+            },
         }
     headers = _validate_headers(matrix[0])
     body: list[list[Any]] = []
@@ -554,6 +571,7 @@ def parse_data_listing_csv(content: bytes, filename: str = "listing.csv") -> dic
             "data_rows": len(rows),
             "target_count": len(targets),
             "unique_term_count": len(unique_terms),
+            "occurrence_count": total_occurrences[0],
         },
     }
 

@@ -166,6 +166,21 @@ class CodingListingTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "重复表头"):
             parse_data_listing_csv(content, "ae.csv")
 
+    def test_bad_zip_excel_is_rejected(self) -> None:
+        with self.assertRaisesRegex(ValueError, "不是有效的 Excel"):
+            parse_data_listing_excel(b"not-a-zip-workbook", "broken.xlsx")
+
+    def test_empty_sheet_workbook_imports_with_zero_occurrences(self) -> None:
+        wb = Workbook()
+        ws = wb.active
+        assert ws is not None
+        ws.title = "Empty"
+        buffer = io.BytesIO()
+        wb.save(buffer)
+        parsed = parse_data_listing_excel(buffer.getvalue(), "empty.xlsx")
+        self.assertEqual(parsed["stats"]["occurrence_count"], 0)
+        self.assertEqual(parsed["unique_terms"], [])
+
     def test_import_payload_shape(self) -> None:
         # Ensure the shape used by the HTTP layer is stable.
         content = "表单编号,受试者编号,不良事件名称(AETERM)\nAE,001,发热\n".encode("utf-8")
@@ -173,6 +188,8 @@ class CodingListingTests(unittest.TestCase):
         self.assertIn("coding_targets", parsed)
         self.assertIn("unique_terms", parsed)
         self.assertIn("stats", parsed)
+        self.assertEqual(parsed["stats"]["occurrence_count"], 1)
+        self.assertEqual(parsed["stats"]["data_rows"], 1)
 
     def test_validate_decision_rejects_mismatched_pt_llt(self) -> None:
         class FakeStore:

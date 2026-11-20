@@ -386,13 +386,14 @@ private final class MedDRAApp: NSObject, NSApplicationDelegate, NSWindowDelegate
                   suggestedFilename: String, completionHandler: @escaping (URL?) -> Void) {
         let save = NSSavePanel()
         save.nameFieldStringValue = suggestedFilename
+        let requestURL = download.originalRequest?.url?.absoluteString ?? response.url?.absoluteString ?? ""
         save.beginSheetModal(for: window) { [weak self] result in
             guard let self, result == .OK, let destination = save.url else {
                 completionHandler(nil)
+                self?.reportDownload(requestURL, saved: false)
                 return
             }
             let staged = destination.deletingLastPathComponent().appendingPathComponent(".meddra-\(UUID().uuidString).tmp")
-            let requestURL = download.originalRequest?.url?.absoluteString ?? response.url?.absoluteString ?? ""
             self.saves[ObjectIdentifier(download)] = SaveJob(staged: staged, final: destination, requestURL: requestURL)
             completionHandler(staged)
         }
@@ -408,11 +409,9 @@ private final class MedDRAApp: NSObject, NSApplicationDelegate, NSWindowDelegate
             } else {
                 try files.moveItem(at: job.staged, to: job.final)
             }
-            webView?.callAsyncJavaScript(
-                "window.dispatchEvent(new CustomEvent('meddra:native-download-saved', { detail: requestURL }));",
-                arguments: ["requestURL": job.requestURL], in: nil, in: .page, completionHandler: nil
-            )
+            reportDownload(job.requestURL, saved: true)
         } catch {
+            reportDownload(job.requestURL, saved: false)
             presentError("无法保存导出文件。\n\(error.localizedDescription)")
         }
     }
@@ -420,8 +419,18 @@ private final class MedDRAApp: NSObject, NSApplicationDelegate, NSWindowDelegate
     func download(_ download: WKDownload, didFailWithError error: Error, resumeData: Data?) {
         if let job = saves.removeValue(forKey: ObjectIdentifier(download)) {
             try? FileManager.default.removeItem(at: job.staged)
+            reportDownload(job.requestURL, saved: false)
             presentError("导出未完成。\n\(error.localizedDescription)")
         }
+    }
+
+    private func reportDownload(_ requestURL: String, saved: Bool) {
+        let event = saved ? "meddra:native-download-saved" : "meddra:native-download-cancelled"
+        webView?.callAsyncJavaScript(
+            "window.dispatchEvent(new CustomEvent(eventName, { detail: requestURL }));",
+            arguments: ["eventName": event, "requestURL": requestURL],
+            in: nil, in: .page, completionHandler: nil
+        )
     }
 
     func webView(_ view: WKWebView, runJavaScriptConfirmPanelWithMessage message: String,

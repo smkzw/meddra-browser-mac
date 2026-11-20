@@ -107,6 +107,15 @@ class ApiManualCoverageTests(unittest.TestCase):
         self.assertEqual(options.status_code, 403)
         self.assertNotEqual(options.headers.get("access-control-allow-origin"), "https://evil.example")
 
+    def test_local_browser_origin_and_referer_require_the_service_port(self) -> None:
+        host = "127.0.0.1:8765"
+        same = self.client.get("/api/runtime-info", headers={"Host": host, "Origin": f"http://{host}"})
+        self.assertEqual(same.status_code, 200)
+        for header in ["Origin", "Referer"]:
+            with self.subTest(header=header):
+                wrong = self.client.get("/api/releases", headers={"Host": host, header: "http://127.0.0.1"})
+                self.assertEqual(wrong.status_code, 403)
+
     def test_export_csv_supports_non_ascii_filename_without_store(self) -> None:
         export = self.client.post(
             "/api/export/csv",
