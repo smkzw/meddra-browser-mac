@@ -201,6 +201,7 @@ class SearchRequest(BaseModel):
     ignore_diacritics: bool = True
     include_non_current: bool = True
     limit_per_group: int = Field(default=60, ge=1, le=500)
+    offset_per_group: int = Field(default=0, ge=0)
 
 
 class AdvancedCondition(BaseModel):
@@ -214,6 +215,8 @@ class AdvancedSearchRequest(BaseModel):
     levels: list[str] = ["PT"]
     boolean: str = "AND"
     conditions: list[AdvancedCondition]
+    offset: int = Field(default=0, ge=0)
+    limit: int = Field(default=200, ge=1, le=500)
 
 
 class ExportRequest(BaseModel):
@@ -607,6 +610,7 @@ def api_search(payload: SearchRequest) -> dict[str, Any]:
         ignore_diacritics=payload.ignore_diacritics,
         include_non_current=payload.include_non_current,
         limit_per_group=payload.limit_per_group,
+        offset_per_group=payload.offset_per_group,
     )
 
 

@@ -1451,6 +1451,7 @@ class MeddraStore:
         ignore_diacritics: bool = True,
         include_non_current: bool = True,
         limit_per_group: int = 60,
+        offset_per_group: int = 0,
     ) -> dict[str, Any]:
         query = (query or "").strip()
         norm_query = normalize_text(query, ignore_diacritics=ignore_diacritics)
@@ -1491,8 +1492,8 @@ class MeddraStore:
         terms = [term for term in self.all_terms() if term["level"] in selected_term_levels and allowed(term)]
         if not query:
             if "SMQ" in selected_levels:
-                self._append_smq_search_results(categories, query, mode, limit_per_group)
-            return self._search_response(query, categories, limit_per_group)
+                self._append_smq_search_results(categories, query, mode)
+            return self._search_response(query, categories, limit_per_group, offset_per_group)
 
         for term in terms:
             for field, value in fields_for(term):
@@ -1581,13 +1582,13 @@ class MeddraStore:
                     abs(len(normalize_text(item[3], ignore_diacritics=ignore_diacritics)) - len(norm_query)),
                 )
             )
-            for score, term, field, value in fuzzy_candidates[:limit_per_group]:
+            for score, term, field, value in fuzzy_candidates:
                 add("fuzzy", term, field, score, f"拼写或近似文本候选；候选字段为“{field}”")
 
         if "SMQ" in selected_levels:
-            self._append_smq_search_results(categories, query, mode, limit_per_group)
+            self._append_smq_search_results(categories, query, mode)
 
-        return self._search_response(query, categories, limit_per_group)
+        return self._search_response(query, categories, limit_per_group, offset_per_group)
 
     def advanced_search(self, payload: dict[str, Any]) -> dict[str, Any]:
         conditions = payload.get("conditions") or []
@@ -1618,11 +1619,14 @@ class MeddraStore:
             return False
 
         results: list[dict[str, Any]] = []
+        offset = payload.get("offset", 0)
+        limit = payload.get("limit", 200)
+        total = 0
         # Support up to 5 conditions; empty values are treated as always-true so
         # boolean logic still matches the UI's fixed two-slot form when extras are blank.
         active_conditions = [cond for cond in conditions[:5] if str(cond.get("value") or "").strip()]
         if not active_conditions:
-            return {"query": payload, "results": [], "count": 0}
+            return {"query": payload, "results": [], "count": 0, "total_count": 0, "next_offset": None}
         for term in terms:
             checks = [match_condition(term, cond) for cond in active_conditions]
             if boolean == "OR":
@@ -1632,10 +1636,13 @@ class MeddraStore:
             else:
                 ok = all(checks)
             if ok:
-                results.append(self._format_result(term, "advanced", "高级搜索", 100, "符合高级搜索条件"))
-            if len(results) >= 200:
-                break
-        return {"query": payload, "results": results, "count": len(results)}
+                if offset <= total < offset + limit:
+                    results.append(self._format_result(term, "advanced", "高级搜索", 100, "符合高级搜索条件"))
+                total += 1
+        return {
+            "query": payload, "results": results, "count": len(results), "total_count": total,
+            "next_offset": offset + limit if offset + limit < total else None,
+        }
 
     def code_lookup(self, code: str) -> dict[str, Any]:
         with self.connect() as con:
@@ -1715,7 +1722,7 @@ class MeddraStore:
                 or row["smq_code"] in code_hits
             ):
                 results.append(self._format_smq(row))
-        return {"query": query, "results": results[:200], "count": len(results)}
+        return {"query": query, "results": results, "count": len(results)}
 
     def synonyms(self, lang: str = "en", limit: int = 500) -> dict[str, Any]:
         lang = "zh" if lang == "zh" else "en"
@@ -1816,25 +1823,33 @@ class MeddraStore:
         return output.getvalue()
 
     def _search_response(
-        self, query: str, categories: dict[str, list[dict[str, Any]]], limit_per_group: int = 60
+        self, query: str, categories: dict[str, list[dict[str, Any]]],
+        limit: int = 60, offset: int = 0,
     ) -> dict[str, Any]:
-        groups = [
-            {
+        end = offset + limit
+        groups: list[dict[str, Any]] = []
+        for key, candidates in categories.items():
+            if not candidates:
+                continue
+            results = sorted(candidates, key=search_result_sort_key)[offset:end]
+            groups.append({
                 "category": key,
                 "label": SEARCH_LABELS[key],
-                "results": sorted(value, key=search_result_sort_key)[:limit_per_group],
-                "count": min(len(value), limit_per_group),
-            }
-            for key, value in categories.items()
-            if value
-        ]
-        return {"query": query, "groups": groups, "count": sum(g["count"] for g in groups)}
+                "results": results,
+                "count": len(results),
+                "total_count": len(candidates),
+            })
+        return {
+            "query": query, "groups": groups, "count": sum(g["count"] for g in groups),
+            "total_count": sum(g["total_count"] for g in groups),
+            "next_offset": end if any(g["total_count"] > end for g in groups) else None,
+        }
 
     def _append_smq_search_results(
-        self, categories: dict[str, list[dict[str, Any]]], query: str, mode: str, limit: int
+        self, categories: dict[str, list[dict[str, Any]]], query: str, mode: str,
     ) -> None:
         rows = self.smq_search(query, mode).get("results", [])
-        for row in rows[:limit]:
+        for row in rows:
             categories["smq"].append(
                 {
                     "level": "SMQ",
@@ -1963,7 +1978,6 @@ class MeddraStore:
             join terms t on t.level=? and t.code=r.child_code
             where r.relation=? and r.parent_code=?
             order by cast(t.code as integer), t.code
-            limit 500
             """,
             (child_level, relation_name, code),
         ).fetchall()
