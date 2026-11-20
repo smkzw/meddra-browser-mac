@@ -179,6 +179,8 @@ class CodingListingTests(unittest.TestCase):
             def term_by_code(self, level: str, code: str):
                 if level == "LLT" and code == "10019211":
                     return {"code": "10019211", "parent_code": "10019211", "zh_name": "头痛", "en_name": "Headache", "is_current": "Y"}
+                if level == "LLT" and code == "10000001":
+                    return {"code": "10000001", "parent_code": "10019211", "zh_name": "旧词", "en_name": "Obsolete", "is_current": "N"}
                 if level == "PT" and code == "10019211":
                     return {"code": "10019211", "zh_name": "头痛", "en_name": "Headache"}
                 if level == "PT" and code == "99999999":
@@ -197,6 +199,62 @@ class CodingListingTests(unittest.TestCase):
         )
         self.assertTrue(good["ok"])
         self.assertEqual(good["codes"]["pt_code"], "10019211")
+
+        pt_only = validate_decision_against_store(
+            FakeStore(),
+            {"status": "accepted", "pt_code": "10019211"},
+        )
+        self.assertFalse(pt_only["ok"])
+        self.assertIn("不允许仅 PT", pt_only["reason"])
+
+        unknown = validate_decision_against_store(
+            FakeStore(),
+            {"status": "accepted", "llt_code": "00000000"},
+        )
+        self.assertFalse(unknown["ok"])
+        self.assertIn("未知", unknown["reason"])
+
+        obsolete = validate_decision_against_store(
+            FakeStore(),
+            {"status": "accepted", "llt_code": "10000001", "pt_code": "10019211"},
+        )
+        self.assertFalse(obsolete["ok"])
+        self.assertIn("非当前", obsolete["reason"])
+
+    def test_export_bundle_rejects_pt_only_and_noncurrent_when_store_bound(self) -> None:
+        class FakeStore:
+            def term_by_code(self, level: str, code: str):
+                if level == "LLT" and code == "10019211":
+                    return {"code": "10019211", "parent_code": "10019211", "zh_name": "头痛", "en_name": "Headache", "is_current": "Y"}
+                if level == "LLT" and code == "10000001":
+                    return {"code": "10000001", "parent_code": "10019211", "zh_name": "旧词", "en_name": "Obsolete", "is_current": "N"}
+                if level == "PT" and code == "10019211":
+                    return {"code": "10019211", "zh_name": "头痛", "en_name": "Headache"}
+                return None
+
+        unique_terms = [
+            {"term": "头痛", "coding_type": "AE", "count": 1, "occurrences": [{"受试者编号": "001"}]},
+            {"term": "旧词", "coding_type": "AE", "count": 1, "occurrences": [{"受试者编号": "002"}]},
+            {"term": "仅PT", "coding_type": "AE", "count": 1, "occurrences": [{"受试者编号": "003"}]},
+        ]
+        decisions = {
+            "AE|头痛": {"status": "accepted", "llt_code": "10019211", "pt_code": "10019211"},
+            "AE|旧词": {"status": "accepted", "llt_code": "10000001", "pt_code": "10019211"},
+            "AE|仅PT": {"status": "accepted", "pt_code": "10019211"},
+        }
+        bundle = build_export_bundle(
+            unique_terms,
+            decisions,
+            dictionary_version="29.0",
+            store=FakeStore(),
+            source_signature="sig",
+        )
+        self.assertEqual(len(bundle["coded_rows"]), 1)
+        self.assertEqual(bundle["coded_rows"][0]["原文术语"], "头痛")
+        self.assertEqual(bundle["coded_rows"][0]["索引签名"], "sig")
+        reasons = {row["原文术语"]: row["审阅异常原因"] for row in bundle["exception_rows"]}
+        self.assertIn("非当前", reasons["旧词"])
+        self.assertIn("仅 PT", reasons["仅PT"])
 
 
 if __name__ == "__main__":

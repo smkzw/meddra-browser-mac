@@ -767,9 +767,17 @@ def api_coding_suggest(payload: CodingSuggestRequest) -> dict[str, Any]:
 
 @app.post("/api/coding/validate")
 def api_coding_validate(payload: CodingValidateRequest) -> dict[str, Any]:
+    if not payload.version or not payload.source_signature:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": "export_identity_required",
+                "message": "编码校验必须提供 version 与 source_signature",
+            },
+        )
     active_store = require_ready_store(payload.version)
     identity = active_store.index_identity()
-    if payload.source_signature and payload.source_signature != identity["source_signature"]:
+    if payload.source_signature != identity["source_signature"]:
         raise HTTPException(
             status_code=409,
             detail={
@@ -800,9 +808,19 @@ def api_coding_export(payload: CodingExportRequest) -> Response:
     dictionary_version = ""
     source_signature = ""
     ready_store = None
-    if payload.dictionary_version or payload.source_signature:
-        # Bind the export request to a ready index so stale UI sessions cannot
-        # silently ship codes against a different dictionary/source.
+    formal_export = export_mode in {"coded", "both"}
+    if formal_export:
+        # Formal coded listings must bind version + source signature and resolve
+        # every confirmed decision against that exact ready index.
+        if not (payload.dictionary_version and payload.source_signature):
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "error": "export_identity_required",
+                    "message": "正式编码导出必须提供 dictionary_version 与 source_signature",
+                },
+            )
+    if formal_export or payload.dictionary_version or payload.source_signature:
         ready_store = require_ready_store(payload.dictionary_version)
         identity = ready_store.index_identity()
         dictionary_version = identity["version"]

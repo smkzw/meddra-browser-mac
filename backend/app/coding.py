@@ -273,68 +273,77 @@ def _codes_from_decision(decision: dict[str, Any]) -> dict[str, str]:
 def _export_ready(status: str, codes: dict[str, str]) -> bool:
     if status not in CONFIRMED_EXPORT_STATUSES:
         return False
-    # A formal coded row needs at least one MedDRA code explicitly confirmed.
-    return bool(codes.get("pt_code") or codes.get("llt_code"))
+    # Formal coded rows require an explicitly confirmed current LLT (PT alone is insufficient).
+    return bool(codes.get("llt_code"))
 
 
 def validate_decision_against_store(store: Any, decision: dict[str, Any]) -> dict[str, Any]:
-    """Resolve PT/LLT against the bound dictionary; enforce parent consistency.
+    """Resolve a confirmed LLT against the bound dictionary and its parent PT.
+
+    Formal coding accepts only a real, current LLT whose parent PT is present in
+    the same index. PT-only, unknown, or non-current (obsolete) LLTs fail closed.
 
     Returns {"ok": True, "codes": {...}, "warnings": [...]} or
-    {"ok": False, "reason": "...", "codes": emptied}.
+    {"ok": False, "reason": "...", "codes": ...}.
     """
     codes = _codes_from_decision(decision)
     pt_code = codes.get("pt_code") or ""
     llt_code = codes.get("llt_code") or ""
     warnings: list[str] = []
-    if not pt_code and not llt_code:
-        return {"ok": False, "reason": "缺少 PT/LLT 代码", "codes": codes, "warnings": warnings}
+    if not llt_code:
+        reason = "正式编码必须确认当前 LLT（不允许仅 PT）" if pt_code else "缺少 LLT 代码"
+        return {"ok": False, "reason": reason, "codes": codes, "warnings": warnings}
 
-    llt_term = store.term_by_code("LLT", llt_code) if llt_code else None
-    pt_term = store.term_by_code("PT", pt_code) if pt_code else None
-
-    if llt_code and llt_term is None:
-        return {"ok": False, "reason": f"LLT {llt_code} 不在当前词典索引中", "codes": codes, "warnings": warnings}
-    if pt_code and pt_term is None and llt_term is None:
-        return {"ok": False, "reason": f"PT {pt_code} 不在当前词典索引中", "codes": codes, "warnings": warnings}
-
-    if llt_term is not None:
-        parent = str(llt_term.get("parent_code") or "")
-        if pt_code and parent and pt_code != parent:
-            return {
-                "ok": False,
-                "reason": f"LLT {llt_code} 的父级 PT 应为 {parent}，不是 {pt_code}",
-                "codes": codes,
-                "warnings": warnings,
-            }
-        if not pt_code and parent:
-            pt_code = parent
-            pt_term = store.term_by_code("PT", parent)
-        if str(llt_term.get("is_current") or "") != "Y":
-            warnings.append("LLT 为非当前术语")
-        codes = {
-            "pt_code": pt_code,
-            "pt_zh": str((pt_term or {}).get("zh_name") or codes.get("pt_zh") or ""),
-            "pt_en": str((pt_term or {}).get("en_name") or codes.get("pt_en") or ""),
-            "llt_code": str(llt_term.get("code") or llt_code),
-            "llt_zh": str(llt_term.get("zh_name") or ""),
-            "llt_en": str(llt_term.get("en_name") or ""),
+    llt_term = store.term_by_code("LLT", llt_code)
+    if llt_term is None:
+        return {
+            "ok": False,
+            "reason": f"LLT {llt_code} 不在当前词典索引中（未知代码）",
+            "codes": codes,
+            "warnings": warnings,
         }
-        if not codes["pt_code"]:
-            return {"ok": False, "reason": f"LLT {llt_code} 缺少可解析的父级 PT", "codes": codes, "warnings": warnings}
-        return {"ok": True, "codes": codes, "warnings": warnings}
+    if str(llt_term.get("is_current") or "") != "Y":
+        return {
+            "ok": False,
+            "reason": f"LLT {llt_code} 为非当前/废弃术语，不得写入正式编码",
+            "codes": codes,
+            "warnings": warnings,
+        }
 
-    # PT-only confirmation.
-    assert pt_term is not None
-    codes = {
-        "pt_code": str(pt_term.get("code") or pt_code),
+    parent = str(llt_term.get("parent_code") or "")
+    if not parent:
+        return {
+            "ok": False,
+            "reason": f"LLT {llt_code} 缺少可解析的父级 PT",
+            "codes": codes,
+            "warnings": warnings,
+        }
+    if pt_code and pt_code != parent:
+        return {
+            "ok": False,
+            "reason": f"LLT {llt_code} 的父级 PT 应为 {parent}，不是 {pt_code}",
+            "codes": codes,
+            "warnings": warnings,
+        }
+
+    pt_term = store.term_by_code("PT", parent)
+    if pt_term is None:
+        return {
+            "ok": False,
+            "reason": f"LLT {llt_code} 的父级 PT {parent} 不在当前词典索引中",
+            "codes": codes,
+            "warnings": warnings,
+        }
+
+    resolved = {
+        "pt_code": str(pt_term.get("code") or parent),
         "pt_zh": str(pt_term.get("zh_name") or ""),
         "pt_en": str(pt_term.get("en_name") or ""),
-        "llt_code": "",
-        "llt_zh": "",
-        "llt_en": "",
+        "llt_code": str(llt_term.get("code") or llt_code),
+        "llt_zh": str(llt_term.get("zh_name") or ""),
+        "llt_en": str(llt_term.get("en_name") or ""),
     }
-    return {"ok": True, "codes": codes, "warnings": warnings}
+    return {"ok": True, "codes": resolved, "warnings": warnings}
 
 def _append_occurrence_rows(
     rows: list[dict[str, Any]],
@@ -852,8 +861,8 @@ def build_export_bundle(
     """Split confirmed coded rows from review exceptions.
 
     Suggestions never become export codes. Only explicit decisions with a
-    confirmed status and at least one code enter the formal coded listing.
-    When `store` is provided, confirmed PT/LLT pairs are resolved and checked
+    confirmed status and a current LLT enter the formal coded listing.
+    When `store` is provided, confirmed LLT→PT pairs are resolved and checked
     against that dictionary before entering coded rows.
     """
     coded_rows: list[dict[str, Any]] = []
@@ -882,7 +891,7 @@ def build_export_bundle(
                     continue
                 codes = checked["codes"]
                 if checked.get("warnings"):
-                    note = (note + "；" if note else "") + "；".join(str(item) for item in checked["warnings"])
+                    note = (note + "；" if note else "") + "；".join(str(w) for w in checked["warnings"])
             _append_occurrence_rows(
                 coded_rows,
                 item=item,
@@ -896,7 +905,11 @@ def build_export_bundle(
             )
             continue
         if status in CONFIRMED_EXPORT_STATUSES:
-            reason = "已确认但缺少 PT/LLT 代码"
+            reason = (
+                "已确认但缺少当前 LLT（不允许仅 PT）"
+                if codes.get("pt_code")
+                else "已确认但缺少 LLT 代码"
+            )
         elif status in {"rejected", "reject"}:
             reason = "已拒绝，不得写入正式编码结果"
         elif status == "pending" or not decision:

@@ -312,11 +312,13 @@ class ApiManualCoverageTests(unittest.TestCase):
         )
         self.assertEqual(imported.status_code, 200)
         unique_terms = imported.json()["unique_terms"]
-        blocked = self.client.post(
+        # Formal coded export without version+signature must fail closed.
+        missing_identity = self.client.post(
             "/api/coding/export",
             json={"unique_terms": unique_terms, "decisions": {}, "export_mode": "coded"},
         )
-        self.assertEqual(blocked.status_code, 409)
+        self.assertEqual(missing_identity.status_code, 400)
+        self.assertEqual(missing_identity.json()["detail"]["error"], "export_identity_required")
         exceptions = self.client.post(
             "/api/coding/export",
             json={
@@ -328,6 +330,38 @@ class ApiManualCoverageTests(unittest.TestCase):
         )
         self.assertEqual(exceptions.status_code, 200)
         self.assertIn("尚未人工确认", exceptions.content.decode("utf-8-sig"))
+
+        suggested = self.client.post(
+            "/api/coding/suggest",
+            json={"terms": [unique_terms[0]["term"]], "version": self.version, "mode": "both"},
+        )
+        self.assertEqual(suggested.status_code, 200)
+        suggestion_payload = suggested.json()
+        source_signature = suggestion_payload["source_signature"]
+        best = (suggestion_payload["suggestions"].get(unique_terms[0]["term"]) or {}).get("best") or {}
+        self.assertEqual(best.get("level"), "LLT")
+        llt_code = str(best["code"])
+        pt_code = str(best.get("parent_code") or best.get("pt_code") or llt_code)
+        # Prefer dictionary PT when the suggester exposes parents; otherwise resolve via validate.
+        validated = self.client.post(
+            "/api/coding/validate",
+            json={
+                "version": self.version,
+                "source_signature": source_signature,
+                "decisions": {
+                    f"{unique_terms[0]['coding_type']}|{unique_terms[0]['term']}": {
+                        "status": "accepted",
+                        "llt_code": llt_code,
+                        "pt_code": pt_code,
+                    }
+                },
+            },
+        )
+        self.assertEqual(validated.status_code, 200)
+        check = validated.json()["results"][f"{unique_terms[0]['coding_type']}|{unique_terms[0]['term']}"]
+        self.assertTrue(check["ok"], check)
+        resolved = check["codes"]
+
         accepted = self.client.post(
             "/api/coding/export",
             json={
@@ -335,16 +369,19 @@ class ApiManualCoverageTests(unittest.TestCase):
                 "decisions": {
                     f"{unique_terms[0]['coding_type']}|{unique_terms[0]['term']}": {
                         "status": "accepted",
-                        "pt_code": "10019211",
-                        "llt_code": "10019211",
+                        "pt_code": resolved["pt_code"],
+                        "llt_code": resolved["llt_code"],
                     }
                 },
                 "export_mode": "coded",
                 "dictionary_version": self.version,
+                "source_signature": source_signature,
             },
         )
         self.assertEqual(accepted.status_code, 200)
-        self.assertIn("10019211", accepted.content.decode("utf-8-sig"))
+        body = accepted.content.decode("utf-8-sig")
+        self.assertIn(resolved["llt_code"], body)
+        self.assertIn(source_signature, body)
 
     def test_running_reindex_status_takes_priority_over_existing_current_index(self) -> None:
         config = default_source_config(self.version)
