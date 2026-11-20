@@ -68,16 +68,21 @@ META_HEADERS = {
     "行号",
 }
 
+# Keep only the minimum identifiers needed to locate a coding decision.
+# Center names / subject status are omitted to reduce patient-context leakage.
 SESSION_META_HEADERS = [
     "项目编号",
     "表单编号",
     "受试者编号",
-    "受试者状态",
-    "试验中心编号",
-    "试验中心名称",
-    "数据节",
     "行号",
 ]
+
+MAX_LISTING_SHEETS = 40
+MAX_ROWS_PER_SHEET = 200_000
+MAX_UNIQUE_TERMS = 20_000
+MAX_OCCURRENCES_PER_TERM = 25
+CONFIRMED_EXPORT_STATUSES = frozenset({"accepted", "edited", "manual", "confirmed"})
+_CSV_FORMULA_PREFIXES = ("=", "+", "-", "@", "\t", "\r", "\n")
 
 
 @dataclass
@@ -175,6 +180,90 @@ def _detect_targets(sheet: str, headers: list[str]) -> list[tuple[str, str]]:
     return targets
 
 
+def csv_safe_cell(value: Any) -> str:
+    text = "" if value is None else str(value)
+    if text.startswith(_CSV_FORMULA_PREFIXES):
+        return f"'{text}"
+    return text
+
+
+def _decision_for_term(decisions: dict[str, dict[str, Any]], coding_type: str, term: str) -> dict[str, Any]:
+    return decisions.get(f"{coding_type}|{term}") or decisions.get(term) or {}
+
+
+def _codes_from_decision(decision: dict[str, Any]) -> dict[str, str]:
+    pt = decision.get("pt") or {}
+    llt = decision.get("llt") or {}
+    pt_code = str(decision.get("pt_code") or pt.get("code") or "")
+    llt_code = str(decision.get("llt_code") or llt.get("code") or "")
+    pt_zh = str(decision.get("pt_zh") or pt.get("zh_name") or "")
+    pt_en = str(decision.get("pt_en") or pt.get("en_name") or "")
+    llt_zh = str(decision.get("llt_zh") or llt.get("zh_name") or "")
+    llt_en = str(decision.get("llt_en") or llt.get("en_name") or "")
+    if llt_code and not pt_code:
+        pt_code = str(decision.get("pt_from_llt_code") or "")
+        pt_zh = str(decision.get("pt_from_llt_zh") or "")
+        pt_en = str(decision.get("pt_from_llt_en") or "")
+    return {
+        "pt_code": pt_code,
+        "pt_zh": pt_zh,
+        "pt_en": pt_en,
+        "llt_code": llt_code,
+        "llt_zh": llt_zh,
+        "llt_en": llt_en,
+    }
+
+
+def _export_ready(status: str, codes: dict[str, str]) -> bool:
+    if status not in CONFIRMED_EXPORT_STATUSES:
+        return False
+    # A formal coded row needs at least one MedDRA code explicitly confirmed.
+    return bool(codes.get("pt_code") or codes.get("llt_code"))
+
+
+def _append_occurrence_rows(
+    rows: list[dict[str, Any]],
+    *,
+    item: dict[str, Any],
+    status: str,
+    note: str,
+    codes: dict[str, str],
+    match_type: str = "",
+    match_score: Any = "",
+    exception_reason: str = "",
+) -> None:
+    term = item.get("term") or ""
+    coding_type = item.get("coding_type") or ""
+    occurrences = list(item.get("occurrences") or [{}])
+    for occ in occurrences[:MAX_OCCURRENCES_PER_TERM]:
+        row = {
+            "术语类型": coding_type,
+            "原文术语": term,
+            "编码状态": status,
+            "匹配方式": match_type,
+            "匹配分": match_score,
+            "PT代码": codes.get("pt_code", ""),
+            "PT中文": codes.get("pt_zh", ""),
+            "PT英文": codes.get("pt_en", ""),
+            "LLT代码": codes.get("llt_code", ""),
+            "LLT中文": codes.get("llt_zh", ""),
+            "LLT英文": codes.get("llt_en", ""),
+            "备注": note,
+        }
+        if exception_reason:
+            row["审阅异常原因"] = exception_reason
+        for meta in SESSION_META_HEADERS:
+            if meta in occ:
+                row[meta] = occ.get(meta) or ""
+        if "sheet" in occ:
+            row["来源Sheet"] = occ.get("sheet") or ""
+        if "column" in occ:
+            row["来源列"] = occ.get("column") or ""
+        if "excel_row" in occ:
+            row["来源行"] = occ.get("excel_row") or ""
+        rows.append(row)
+
+
 def parse_data_listing_excel(content: bytes, filename: str = "") -> dict[str, Any]:
     """Parse a multi-sheet data listing workbook (or CSV) into coding targets + unique terms."""
     from openpyxl import load_workbook
@@ -189,9 +278,13 @@ def parse_data_listing_excel(content: bytes, filename: str = "") -> dict[str, An
         unique_map: dict[tuple[str, str], UniqueTerm] = {}
         total_rows = 0
 
+        sheet_seen = 0
         for sheet_name in workbook.sheetnames:
             if sheet_name.upper() == "TOC":
                 continue
+            sheet_seen += 1
+            if sheet_seen > MAX_LISTING_SHEETS:
+                raise ValueError(f"工作表过多，最多支持 {MAX_LISTING_SHEETS} 个数据表")
             ws = workbook[sheet_name]
             rows_iter = ws.iter_rows(values_only=True)
             try:
@@ -210,6 +303,8 @@ def parse_data_listing_excel(content: bytes, filename: str = "") -> dict[str, An
                 if all(cell is None or str(cell).strip() == "" for cell in values):
                     continue
                 sheet_rows.append(list(values))
+                if len(sheet_rows) > MAX_ROWS_PER_SHEET:
+                    raise ValueError(f"工作表 {sheet_name} 行数超过上限 {MAX_ROWS_PER_SHEET}")
             total_rows += len(sheet_rows)
             rows = _parse_rows_from_matrix(headers, sheet_rows, sheet_name)
             sheet_targets = _detect_targets(sheet_name, headers)
@@ -236,14 +331,15 @@ def parse_data_listing_excel(content: bytes, filename: str = "") -> dict[str, An
                     if key not in unique_map:
                         unique_map[key] = UniqueTerm(term=term, coding_type=coding_type, count=0)
                     unique_map[key].count += 1
-                    unique_map[key].occurrences.append(
-                        {
-                            "sheet": sheet_name,
-                            "column": column,
-                            **_row_meta(row),
-                            "excel_row": row.get("_excel_row"),
-                        }
-                    )
+                    if len(unique_map[key].occurrences) < MAX_OCCURRENCES_PER_TERM:
+                        unique_map[key].occurrences.append(
+                            {
+                                "sheet": sheet_name,
+                                "column": column,
+                                **_row_meta(row),
+                                "excel_row": row.get("_excel_row"),
+                            }
+                        )
                 targets.append(
                     CodingTarget(
                         sheet=sheet_name,
@@ -258,6 +354,8 @@ def parse_data_listing_excel(content: bytes, filename: str = "") -> dict[str, An
             unique_map.values(),
             key=lambda item: (-item.count, item.coding_type, item.term),
         )
+        if len(unique_terms) > MAX_UNIQUE_TERMS:
+            raise ValueError(f"唯一术语过多，最多支持 {MAX_UNIQUE_TERMS} 个")
         return {
             "filename": filename,
             "sheets": sheets_info,
@@ -288,6 +386,8 @@ def parse_data_listing_csv(content: bytes, filename: str = "listing.csv") -> dic
         }
     headers = [_header_text(cell) for cell in matrix[0]]
     body = [list(row) for row in matrix[1:] if any(str(c).strip() for c in row)]
+    if len(body) > MAX_ROWS_PER_SHEET:
+        raise ValueError(f"CSV 行数超过上限 {MAX_ROWS_PER_SHEET}")
     # Treat CSV as a single sheet named after the file stem.
     sheet_name = Path(filename).stem[:32] or "CSV"
     rows = _parse_rows_from_matrix(headers, body, sheet_name)
@@ -332,6 +432,8 @@ def parse_data_listing_csv(content: bytes, filename: str = "listing.csv") -> dic
         )
 
     unique_terms = sorted(unique_map.values(), key=lambda item: (-item.count, item.coding_type, item.term))
+    if len(unique_terms) > MAX_UNIQUE_TERMS:
+        raise ValueError(f"唯一术语过多，最多支持 {MAX_UNIQUE_TERMS} 个")
     return {
         "filename": filename,
         "sheets": [
@@ -561,62 +663,71 @@ class TermSuggester:
         return None
 
 
+def build_export_bundle(
+    unique_terms: list[dict[str, Any]],
+    decisions: dict[str, dict[str, Any]],
+) -> dict[str, Any]:
+    """Split confirmed coded rows from review exceptions.
+
+    Suggestions never become export codes. Only explicit decisions with a
+    confirmed status and at least one code enter the formal coded listing.
+    """
+    coded_rows: list[dict[str, Any]] = []
+    exception_rows: list[dict[str, Any]] = []
+    for item in unique_terms:
+        term = item.get("term") or ""
+        coding_type = item.get("coding_type") or ""
+        decision = _decision_for_term(decisions, coding_type, term)
+        status = str(decision.get("status") or "pending").strip().lower() or "pending"
+        note = str(decision.get("note") or "")
+        codes = _codes_from_decision(decision)
+        if _export_ready(status, codes):
+            _append_occurrence_rows(
+                coded_rows,
+                item=item,
+                status=status,
+                note=note,
+                codes=codes,
+                match_type=str(decision.get("match_type") or ""),
+                match_score=decision.get("score") or "",
+            )
+            continue
+        if status in CONFIRMED_EXPORT_STATUSES:
+            reason = "已确认但缺少 PT/LLT 代码"
+        elif status in {"rejected", "reject"}:
+            reason = "已拒绝，不得写入正式编码结果"
+        elif status == "pending" or not decision:
+            reason = "尚未人工确认"
+        else:
+            reason = f"状态 {status} 不可导出为正式编码"
+        # Never copy suggestion/best codes into exception rows either.
+        _append_occurrence_rows(
+            exception_rows,
+            item=item,
+            status=status,
+            note=note,
+            codes={"pt_code": "", "pt_zh": "", "pt_en": "", "llt_code": "", "llt_zh": "", "llt_en": ""},
+            exception_reason=reason,
+        )
+    return {
+        "coded_rows": coded_rows,
+        "exception_rows": exception_rows,
+        "stats": {
+            "unique_term_count": len(unique_terms),
+            "coded_row_count": len(coded_rows),
+            "exception_row_count": len(exception_rows),
+            "confirmed_term_count": len({(r.get("术语类型"), r.get("原文术语")) for r in coded_rows}),
+            "exception_term_count": len({(r.get("术语类型"), r.get("原文术语")) for r in exception_rows}),
+        },
+    }
+
+
 def build_export_rows(
     unique_terms: list[dict[str, Any]],
     decisions: dict[str, dict[str, Any]],
 ) -> list[dict[str, Any]]:
-    """Expand unique-term decisions back into occurrence-level coded listing rows."""
-    rows: list[dict[str, Any]] = []
-    for item in unique_terms:
-        term = item.get("term") or ""
-        coding_type = item.get("coding_type") or ""
-        decision = decisions.get(f"{coding_type}|{term}") or decisions.get(term) or {}
-        suggestion = item.get("suggestion") or {}
-        best = suggestion.get("best") or {}
-        pt = decision.get("pt") or {}
-        llt = decision.get("llt") or {}
-        status = decision.get("status") or ("accepted" if best else "pending")
-        note = decision.get("note") or ""
-
-        pt_code = decision.get("pt_code") or pt.get("code") or (best.get("code") if best.get("level") == "PT" else "")
-        pt_zh = decision.get("pt_zh") or pt.get("zh_name") or (best.get("zh_name") if best.get("level") == "PT" else "")
-        pt_en = decision.get("pt_en") or pt.get("en_name") or (best.get("en_name") if best.get("level") == "PT" else "")
-        llt_code = decision.get("llt_code") or llt.get("code") or (best.get("code") if best.get("level") == "LLT" else "")
-        llt_zh = decision.get("llt_zh") or llt.get("zh_name") or (best.get("zh_name") if best.get("level") == "LLT" else "")
-        llt_en = decision.get("llt_en") or llt.get("en_name") or (best.get("en_name") if best.get("level") == "LLT" else "")
-
-        # Fill PT from LLT parent when missing.
-        if llt_code and not pt_code:
-            pt_code = decision.get("pt_from_llt_code") or ""
-            pt_zh = decision.get("pt_from_llt_zh") or ""
-            pt_en = decision.get("pt_from_llt_en") or ""
-
-        for occ in item.get("occurrences") or [{}]:
-            row = {
-                "术语类型": coding_type,
-                "原文术语": term,
-                "编码状态": status,
-                "匹配方式": best.get("match_type") or "",
-                "匹配分": best.get("score") or "",
-                "PT代码": pt_code,
-                "PT中文": pt_zh,
-                "PT英文": pt_en,
-                "LLT代码": llt_code,
-                "LLT中文": llt_zh,
-                "LLT英文": llt_en,
-                "备注": note,
-            }
-            for meta in SESSION_META_HEADERS:
-                if meta in occ:
-                    row[meta] = occ.get(meta) or ""
-            if "sheet" in occ:
-                row["来源Sheet"] = occ.get("sheet") or ""
-            if "column" in occ:
-                row["来源列"] = occ.get("column") or ""
-            if "excel_row" in occ:
-                row["来源行"] = occ.get("excel_row") or ""
-            rows.append(row)
-    return rows
+    """Backward-compatible helper: formal coded rows only."""
+    return build_export_bundle(unique_terms, decisions)["coded_rows"]
 
 
 def code_to_csv(rows: list[dict[str, Any]]) -> str:
@@ -647,7 +758,7 @@ def code_to_csv(rows: list[dict[str, Any]]) -> str:
     writer = csv.DictWriter(output, fieldnames=fieldnames, extrasaction="ignore")
     writer.writeheader()
     for row in rows:
-        writer.writerow({key: row.get(key, "") for key in fieldnames})
+        writer.writerow({key: csv_safe_cell(row.get(key, "")) for key in fieldnames})
     return output.getvalue()
 
 
