@@ -16,6 +16,7 @@ from app.meddra_data import (
     REQUIRED_ASC_FILES,
     MeddraIndexer,
     MeddraStore,
+    add_source_root,
     default_source_config,
     discover_releases,
     fuzzy_score,
@@ -107,6 +108,23 @@ class MeddraDataTests(unittest.TestCase):
             self.assertEqual(releases["30.2"].english_dir, preferred)
             self.assertIn("en", releases["30.2"].source_conflicts)
             self.assertIn("source_conflicts", releases["30.2"].as_dict())
+
+    def test_newest_source_root_wins_same_version(self) -> None:
+        with TemporaryDirectory() as tmp:
+            state = Path(tmp) / "state"
+            old_root = Path(tmp) / "old"
+            new_root = Path(tmp) / "new"
+            old_ascii = old_root / "MedDRA_30_3_English" / "MedAscii"
+            new_ascii = new_root / "MedDRA_30_3_English" / "MedAscii"
+            for base in (old_ascii, new_ascii):
+                base.mkdir(parents=True)
+                for file_name in REQUIRED_ASC_FILES:
+                    (base / file_name).write_text("10000001$Term$\n", encoding="utf-8")
+            with patch.dict(os.environ, {"MEDDRA_BROWSER_STATE_DIR": str(state), "MEDDRA_SOURCE_ROOT": ""}, clear=False):
+                add_source_root(str(old_root))
+                add_source_root(str(new_root))
+                release = select_release(discover_releases(), "30.3")
+                self.assertEqual(release.english_dir, new_ascii)
 
     def test_synonym_lookup_stays_inside_selected_root(self) -> None:
         with TemporaryDirectory() as tmp:

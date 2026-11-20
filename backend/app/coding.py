@@ -277,6 +277,65 @@ def _export_ready(status: str, codes: dict[str, str]) -> bool:
     return bool(codes.get("pt_code") or codes.get("llt_code"))
 
 
+def validate_decision_against_store(store: Any, decision: dict[str, Any]) -> dict[str, Any]:
+    """Resolve PT/LLT against the bound dictionary; enforce parent consistency.
+
+    Returns {"ok": True, "codes": {...}, "warnings": [...]} or
+    {"ok": False, "reason": "...", "codes": emptied}.
+    """
+    codes = _codes_from_decision(decision)
+    pt_code = codes.get("pt_code") or ""
+    llt_code = codes.get("llt_code") or ""
+    warnings: list[str] = []
+    if not pt_code and not llt_code:
+        return {"ok": False, "reason": "缺少 PT/LLT 代码", "codes": codes, "warnings": warnings}
+
+    llt_term = store.term_by_code("LLT", llt_code) if llt_code else None
+    pt_term = store.term_by_code("PT", pt_code) if pt_code else None
+
+    if llt_code and llt_term is None:
+        return {"ok": False, "reason": f"LLT {llt_code} 不在当前词典索引中", "codes": codes, "warnings": warnings}
+    if pt_code and pt_term is None and llt_term is None:
+        return {"ok": False, "reason": f"PT {pt_code} 不在当前词典索引中", "codes": codes, "warnings": warnings}
+
+    if llt_term is not None:
+        parent = str(llt_term.get("parent_code") or "")
+        if pt_code and parent and pt_code != parent:
+            return {
+                "ok": False,
+                "reason": f"LLT {llt_code} 的父级 PT 应为 {parent}，不是 {pt_code}",
+                "codes": codes,
+                "warnings": warnings,
+            }
+        if not pt_code and parent:
+            pt_code = parent
+            pt_term = store.term_by_code("PT", parent)
+        if str(llt_term.get("is_current") or "") != "Y":
+            warnings.append("LLT 为非当前术语")
+        codes = {
+            "pt_code": pt_code,
+            "pt_zh": str((pt_term or {}).get("zh_name") or codes.get("pt_zh") or ""),
+            "pt_en": str((pt_term or {}).get("en_name") or codes.get("pt_en") or ""),
+            "llt_code": str(llt_term.get("code") or llt_code),
+            "llt_zh": str(llt_term.get("zh_name") or ""),
+            "llt_en": str(llt_term.get("en_name") or ""),
+        }
+        if not codes["pt_code"]:
+            return {"ok": False, "reason": f"LLT {llt_code} 缺少可解析的父级 PT", "codes": codes, "warnings": warnings}
+        return {"ok": True, "codes": codes, "warnings": warnings}
+
+    # PT-only confirmation.
+    assert pt_term is not None
+    codes = {
+        "pt_code": str(pt_term.get("code") or pt_code),
+        "pt_zh": str(pt_term.get("zh_name") or ""),
+        "pt_en": str(pt_term.get("en_name") or ""),
+        "llt_code": "",
+        "llt_zh": "",
+        "llt_en": "",
+    }
+    return {"ok": True, "codes": codes, "warnings": warnings}
+
 def _append_occurrence_rows(
     rows: list[dict[str, Any]],
     *,
@@ -288,6 +347,7 @@ def _append_occurrence_rows(
     match_score: Any = "",
     exception_reason: str = "",
     dictionary_version: str = "",
+    source_signature: str = "",
 ) -> None:
     term = item.get("term") or ""
     coding_type = item.get("coding_type") or ""
@@ -315,6 +375,8 @@ def _append_occurrence_rows(
         }
         if dictionary_version:
             row["词典版本"] = dictionary_version
+        if source_signature:
+            row["索引签名"] = source_signature
         if exception_reason:
             row["审阅异常原因"] = exception_reason
         for meta in SESSION_META_HEADERS:
@@ -784,11 +846,15 @@ def build_export_bundle(
     decisions: dict[str, dict[str, Any]],
     *,
     dictionary_version: str = "",
+    store: Any | None = None,
+    source_signature: str = "",
 ) -> dict[str, Any]:
     """Split confirmed coded rows from review exceptions.
 
     Suggestions never become export codes. Only explicit decisions with a
     confirmed status and at least one code enter the formal coded listing.
+    When `store` is provided, confirmed PT/LLT pairs are resolved and checked
+    against that dictionary before entering coded rows.
     """
     coded_rows: list[dict[str, Any]] = []
     exception_rows: list[dict[str, Any]] = []
@@ -800,6 +866,23 @@ def build_export_bundle(
         note = str(decision.get("note") or "")
         codes = _codes_from_decision(decision)
         if _export_ready(status, codes):
+            if store is not None:
+                checked = validate_decision_against_store(store, decision)
+                if not checked.get("ok"):
+                    _append_occurrence_rows(
+                        exception_rows,
+                        item=item,
+                        status=status,
+                        note=note,
+                        codes={"pt_code": "", "pt_zh": "", "pt_en": "", "llt_code": "", "llt_zh": "", "llt_en": ""},
+                        exception_reason=str(checked.get("reason") or "词典校验失败"),
+                        dictionary_version=dictionary_version,
+                        source_signature=source_signature,
+                    )
+                    continue
+                codes = checked["codes"]
+                if checked.get("warnings"):
+                    note = (note + "；" if note else "") + "；".join(str(item) for item in checked["warnings"])
             _append_occurrence_rows(
                 coded_rows,
                 item=item,
@@ -809,6 +892,7 @@ def build_export_bundle(
                 match_type=str(decision.get("match_type") or ""),
                 match_score=decision.get("score") or "",
                 dictionary_version=dictionary_version,
+                source_signature=source_signature,
             )
             continue
         if status in CONFIRMED_EXPORT_STATUSES:
@@ -828,6 +912,7 @@ def build_export_bundle(
             codes={"pt_code": "", "pt_zh": "", "pt_en": "", "llt_code": "", "llt_zh": "", "llt_en": ""},
             exception_reason=reason,
             dictionary_version=dictionary_version,
+            source_signature=source_signature,
         )
     return {
         "coded_rows": coded_rows,
@@ -860,6 +945,7 @@ def code_to_csv(rows: list[dict[str, Any]]) -> str:
         "原文术语",
         "编码状态",
         "词典版本",
+        "索引签名",
         "PT代码",
         "PT中文",
         "PT英文",

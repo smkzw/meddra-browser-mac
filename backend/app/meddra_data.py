@@ -406,9 +406,10 @@ def add_source_root(path: str) -> Path:
         raise RuntimeError("目录不存在或不可读取")
     if not discover_releases(candidate):
         raise RuntimeError("未在所选文件夹或其子文件夹中发现可用的MedDRA ASCII词典目录")
-    roots = load_source_roots()
-    if candidate not in roots:
-        roots.append(candidate)
+    roots = [item for item in load_source_roots() if item != candidate]
+    # Newest explicit selection becomes the first configured root so the same
+    # MedDRA version from a newly chosen folder wins over stale earlier roots.
+    roots.insert(0, candidate)
     target = source_roots_file()
     target.parent.mkdir(parents=True, exist_ok=True)
     payload = json.dumps([{"path": str(item)} for item in roots], ensure_ascii=False, indent=2)
@@ -451,6 +452,7 @@ def discover_releases(root: Path | None = None) -> list[ReleaseInfo]:
     roots = configured_source_roots(root) if root is None else [root.expanduser()]
     by_version: dict[str, dict[str, Path]] = {}
     conflicts: dict[str, set[str]] = {}
+    claimed_roots: dict[tuple[str, str], Path] = {}
     for med_root in roots:
         if not med_root.exists():
             continue
@@ -469,12 +471,18 @@ def discover_releases(root: Path | None = None) -> list[ReleaseInfo]:
                 continue
             current = by_version.setdefault(version, {})
             existing = current.get(lang)
+            claim_key = (version, lang)
             if existing is None:
                 current[lang] = base
+                claimed_roots[claim_key] = med_root
                 continue
             if existing == base:
                 continue
             conflicts.setdefault(version, set()).add(lang)
+            # Configured root order wins across roots (newest add_source_root is
+            # prepended). Within one root, prefer MedAscii/ascii-* layout.
+            if claimed_roots.get(claim_key) != med_root:
+                continue
             if dictionary_preference_key(base) < dictionary_preference_key(existing):
                 current[lang] = base
     releases = [
@@ -1419,6 +1427,33 @@ class MeddraStore:
         finally:
             con.close()
 
+    def index_identity(self) -> dict[str, Any]:
+        """Public, path-free identity for binding coding sessions to an index."""
+        signature = ""
+        with self.connect() as con:
+            try:
+                row = con.execute(
+                    "select value from index_metadata where key='source_signature'"
+                ).fetchone()
+                if row is not None:
+                    signature = str(row["value"])
+            except (sqlite3.DatabaseError, KeyError, IndexError, TypeError):
+                signature = ""
+        if not signature:
+            signature = MeddraIndexer(self.config)._source_signature()
+        languages = [
+            lang
+            for lang, path in [("en", self.config.english_dir), ("zh", self.config.chinese_dir)]
+            if path is not None
+        ]
+        return {
+            "version": self.config.version,
+            "available_languages": languages,
+            "source_signature": signature,
+            "index_signature_version": INDEX_SIGNATURE_VERSION,
+            "complete": bool(self.config.english_dir and self.config.chinese_dir),
+        }
+
     def status(self) -> dict[str, Any]:
         with self.connect() as con:
             counts = con.execute("select * from source_counts order by lang, file_name").fetchall()
@@ -1426,19 +1461,26 @@ class MeddraStore:
                 "select level, count(*) as n from terms group by level order by case level when 'SOC' then 1 when 'HLGT' then 2 when 'HLT' then 3 when 'PT' then 4 when 'LLT' then 5 end"
             ).fetchall()
             smq_count = con.execute("select count(*) as n from smq").fetchone()["n"]
+            identity = self.index_identity()
             return {
                 "version": self.config.version,
-                "available_languages": [
-                    lang
-                    for lang, path in [("en", self.config.english_dir), ("zh", self.config.chinese_dir)]
-                    if path is not None
-                ],
+                "available_languages": identity["available_languages"],
+                "source_signature": identity["source_signature"],
+                "index_signature_version": identity["index_signature_version"],
                 "search_levels": ALL_SEARCH_LEVELS,
                 "available_versions": [row.as_dict() for row in self.config.available_versions],
                 "counts": [dict(row) for row in counts],
                 "term_counts": [dict(row) for row in term_counts],
                 "smq_count": smq_count,
             }
+
+    def term_by_code(self, level: str, code: str) -> dict[str, Any] | None:
+        with self.connect() as con:
+            row = con.execute(
+                "select * from terms where level=? and code=?",
+                (level.upper(), str(code)),
+            ).fetchone()
+        return dict(row) if row is not None else None
 
     def search(
         self,

@@ -26,6 +26,7 @@ from .coding import (
     content_disposition_attachment,
     parse_data_listing_csv,
     parse_data_listing_excel,
+    validate_decision_against_store,
 )
 from .meddra_data import (
     ALL_SEARCH_LEVELS,
@@ -248,6 +249,13 @@ class CodingExportRequest(BaseModel):
     # both = coded rows followed by an exception section.
     export_mode: str = Field(default="coded")
     dictionary_version: Optional[str] = None
+    source_signature: Optional[str] = None
+
+
+class CodingValidateRequest(BaseModel):
+    decisions: dict[str, dict[str, Any]] = Field(default_factory=dict)
+    version: Optional[str] = None
+    source_signature: Optional[str] = None
 
 
 def index_job_key(config: Any) -> str:
@@ -744,17 +752,43 @@ def api_coding_suggest(payload: CodingSuggestRequest) -> dict[str, Any]:
         raise
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=500, detail=f"批量建议失败：{exc}") from exc
+    identity = active_store.index_identity()
     # Suggestions are candidates only; clients must keep decisions pending until review.
     return {
         "suggestions": suggestions,
         "count": len(suggestions),
-        "version": active_store.config.version,
-        "available_languages": [
-            lang
-            for lang, path in [("en", active_store.config.english_dir), ("zh", active_store.config.chinese_dir)]
-            if path is not None
-        ],
+        "version": identity["version"],
+        "available_languages": identity["available_languages"],
+        "source_signature": identity["source_signature"],
+        "index_identity": identity,
         "auto_accept": False,
+    }
+
+
+@app.post("/api/coding/validate")
+def api_coding_validate(payload: CodingValidateRequest) -> dict[str, Any]:
+    active_store = require_ready_store(payload.version)
+    identity = active_store.index_identity()
+    if payload.source_signature and payload.source_signature != identity["source_signature"]:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": "index_identity_mismatch",
+                "message": "决定绑定的索引签名与当前就绪词典不一致，请重新建议并复审",
+                "index_identity": identity,
+            },
+        )
+    results: dict[str, Any] = {}
+    for key, decision in payload.decisions.items():
+        checked = validate_decision_against_store(active_store, decision or {})
+        results[key] = checked
+    return {
+        "version": identity["version"],
+        "source_signature": identity["source_signature"],
+        "index_identity": identity,
+        "results": results,
+        "ok_count": sum(1 for item in results.values() if item.get("ok")),
+        "error_count": sum(1 for item in results.values() if not item.get("ok")),
     }
 
 
@@ -764,16 +798,31 @@ def api_coding_export(payload: CodingExportRequest) -> Response:
     if export_mode not in {"coded", "exceptions", "both"}:
         raise HTTPException(status_code=400, detail="export_mode 仅支持 coded / exceptions / both")
     dictionary_version = ""
-    if payload.dictionary_version:
-        # Bind the export request to a ready index version so stale UI sessions
-        # cannot silently ship codes against a different dictionary.
-        ready = require_ready_store(payload.dictionary_version)
-        dictionary_version = ready.config.version
+    source_signature = ""
+    ready_store = None
+    if payload.dictionary_version or payload.source_signature:
+        # Bind the export request to a ready index so stale UI sessions cannot
+        # silently ship codes against a different dictionary/source.
+        ready_store = require_ready_store(payload.dictionary_version)
+        identity = ready_store.index_identity()
+        dictionary_version = identity["version"]
+        source_signature = identity["source_signature"]
+        if payload.source_signature and payload.source_signature != source_signature:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "error": "index_identity_mismatch",
+                    "message": "导出绑定的索引签名与当前就绪词典不一致",
+                    "index_identity": identity,
+                },
+            )
     try:
         bundle = build_export_bundle(
             payload.unique_terms,
             payload.decisions,
             dictionary_version=dictionary_version,
+            store=ready_store,
+            source_signature=source_signature,
         )
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
@@ -808,6 +857,8 @@ def api_coding_export(payload: CodingExportRequest) -> Response:
             "X-MedDRA-Export-Mode": export_mode,
             "X-MedDRA-Coded-Rows": str(bundle["stats"]["coded_row_count"]),
             "X-MedDRA-Exception-Rows": str(bundle["stats"]["exception_row_count"]),
+            "X-MedDRA-Version": dictionary_version,
+            "X-MedDRA-Source-Signature": source_signature,
         },
     )
 

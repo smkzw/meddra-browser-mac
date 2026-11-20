@@ -17,6 +17,7 @@ from app.coding import (
     parse_data_listing_csv,
     parse_data_listing_excel,
     safe_download_filename,
+    validate_decision_against_store,
 )
 from app.meddra_data import clinical_zh_expansions
 
@@ -172,6 +173,30 @@ class CodingListingTests(unittest.TestCase):
         self.assertIn("coding_targets", parsed)
         self.assertIn("unique_terms", parsed)
         self.assertIn("stats", parsed)
+
+    def test_validate_decision_rejects_mismatched_pt_llt(self) -> None:
+        class FakeStore:
+            def term_by_code(self, level: str, code: str):
+                if level == "LLT" and code == "10019211":
+                    return {"code": "10019211", "parent_code": "10019211", "zh_name": "头痛", "en_name": "Headache", "is_current": "Y"}
+                if level == "PT" and code == "10019211":
+                    return {"code": "10019211", "zh_name": "头痛", "en_name": "Headache"}
+                if level == "PT" and code == "99999999":
+                    return {"code": "99999999", "zh_name": "其他", "en_name": "Other"}
+                return None
+
+        bad = validate_decision_against_store(
+            FakeStore(),
+            {"status": "accepted", "llt_code": "10019211", "pt_code": "99999999"},
+        )
+        self.assertFalse(bad["ok"])
+        self.assertIn("父级 PT", bad["reason"])
+        good = validate_decision_against_store(
+            FakeStore(),
+            {"status": "accepted", "llt_code": "10019211", "pt_code": "10019211"},
+        )
+        self.assertTrue(good["ok"])
+        self.assertEqual(good["codes"]["pt_code"], "10019211")
 
 
 if __name__ == "__main__":
