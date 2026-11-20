@@ -17,6 +17,8 @@
 
 Mac 包采用本地签名。首次打开如果出现开发者验证提示，请先确认来源和 Releases 中的 `SHA256SUMS.txt`。设备策略允许时，可在「系统设置 → 隐私与安全性」处理本次打开授权。操作路径见 [Apple 支持](https://support.apple.com/zh-cn/102445)。
 
+Apple 芯片 Mac 从早期脚本版升级时，请用发行页的通用 App 替换「应用程序」里的旧副本。通过 Finder 的「显示简介」可核对 App 的种类为「应用程序（通用）」，并取消勾选「使用 Rosetta 打开」（如有）。macOS 28 的 Intel 组件提示说明见 [Apple 支持](https://support.apple.com/zh-cn/102527)。
+
 ## 首次导入词典
 
 1. 在工作台点「选择词典文件夹」。也可从「设置」进入。

@@ -51,7 +51,7 @@ SECURITY_HEADERS = {
     "Cache-Control": "no-store",
 }
 
-app = FastAPI(title="MedDRA Browser", version="0.2.0")
+app = FastAPI(title="MedDRA Browser", version="0.2.1")
 if (FRONTEND_DIST / "assets").exists():
     app.mount("/assets", StaticFiles(directory=FRONTEND_DIST / "assets"), name="assets")
 

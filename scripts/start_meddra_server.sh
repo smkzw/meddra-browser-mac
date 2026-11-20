@@ -5,8 +5,14 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
 if [[ -d tools ]]; then
-  case "$(/usr/bin/uname -m)" in
-    arm64|x86_64) runtime="tools/python/macos-$(/usr/bin/uname -m)/bin/python3.13" ;;
+  # A translated terminal reports x86_64 even on Apple silicon.
+  runtime_arch="$(/usr/bin/uname -m)"
+  if [[ "$(/usr/sbin/sysctl -n hw.optional.arm64 2>/dev/null || true)" == 1 ||
+        "$(/usr/sbin/sysctl -n sysctl.proc_translated 2>/dev/null || true)" == 1 ]]; then
+    runtime_arch=arm64
+  fi
+  case "$runtime_arch" in
+    arm64|x86_64) runtime="tools/python/macos-$runtime_arch/bin/python3.13" ;;
     *) echo "当前 Mac 处理器架构不受支持。" >&2; exit 1 ;;
   esac
   if [[ ! -x "$runtime" ]]; then

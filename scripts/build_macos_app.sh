@@ -50,6 +50,7 @@ Path(path).write_bytes(plistlib.dumps({
     "CFBundleDevelopmentRegion": "zh_CN",
     "LSApplicationCategoryType": "public.app-category.medical",
     "LSMinimumSystemVersion": "12.0",
+    "LSArchitecturePriority": ["arm64", "x86_64"],
     "NSHighResolutionCapable": True,
     "NSDocumentsFolderUsageDescription": "读取你选择的 MedDRA 词典和待编码文件。",
     "NSDownloadsFolderUsageDescription": "读取你选择的词典或保存导出的文件。",
